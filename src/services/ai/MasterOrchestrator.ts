@@ -10,8 +10,8 @@ interface OrchestratorInput {
   currentPrice: number;
   regime: MarketRegime;
   accountBalance: number;
-  riskPercent: number;  // Changed from riskPerTrade
-  agentOutputs: {       // Changed from separate fields
+  riskPercent: number;
+  agentOutputs: {
     research: ResearchOutput;
     technical: TechnicalOutput;
     predictor: PredictorOutput;
@@ -128,4 +128,36 @@ Synthesize all inputs and provide your trading decision as JSON.`;
         };
 
         return {
-          action: parsed.ac
+          action: parsed.action || 'HOLD',
+          confidence: parsed.confidence || 0,
+          entryPrice: parsed.entry_price || currentPrice,
+          stopLoss: parsed.stop_loss || 0,
+          takeProfit1: parsed.take_profit_1 || 0,
+          takeProfit2: parsed.take_profit_2 || 0,
+          takeProfit3: parsed.take_profit_3 || 0,
+          reasoning: parsed.reasoning || content,
+          agentOutputs: {},
+          agentScores
+        };
+      }
+      return this.getHoldDecision(currentPrice, 'Failed to parse response');
+    } catch {
+      return this.getHoldDecision(currentPrice, 'JSON parse error');
+    }
+  }
+
+  private getHoldDecision(currentPrice: number, reason: string): SignalDecision {
+    return {
+      action: 'HOLD',
+      confidence: 0,
+      entryPrice: currentPrice,
+      stopLoss: 0,
+      takeProfit1: 0,
+      takeProfit2: 0,
+      takeProfit3: 0,
+      reasoning: reason,
+      agentOutputs: {},
+      agentScores: { research: 0, technical: 0, predictor: 0 }
+    };
+  }
+}
