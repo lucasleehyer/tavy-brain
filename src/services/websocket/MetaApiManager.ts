@@ -62,7 +62,33 @@ export class MetaApiManager extends EventEmitter {
   }
 
   private setupEventHandlers(): void {
+    let tickCount = 0;
+    const logInterval = 100; // Log every 100 ticks to reduce verbosity
+
     this.connection.addSynchronizationListener({
+      // Handle batch price updates (plural - primary method used by MetaAPI SDK)
+      onSymbolPricesUpdated: (instanceIndex: string, prices: any[]) => {
+        for (const price of prices) {
+          const tick: Tick = {
+            symbol: price.symbol,
+            bid: price.bid,
+            ask: price.ask,
+            time: new Date(price.time),
+            spread: price.ask - price.bid
+          };
+
+          this.priceCache.update(tick);
+          this.candleBuilder.addTick(tick);
+          this.emit('tick', tick);
+          
+          tickCount++;
+          if (tickCount % logInterval === 0) {
+            logger.debug(`Processed ${tickCount} ticks, latest: ${price.symbol} ${price.bid}/${price.ask}`);
+          }
+        }
+      },
+
+      // Handle single price updates (singular - fallback)
       onSymbolPriceUpdated: (instanceIndex: string, price: any) => {
         const tick: Tick = {
           symbol: price.symbol,
@@ -72,13 +98,8 @@ export class MetaApiManager extends EventEmitter {
           spread: price.ask - price.bid
         };
 
-        // Update cache
         this.priceCache.update(tick);
-
-        // Build candles
         this.candleBuilder.addTick(tick);
-
-        // Emit for signal processing
         this.emit('tick', tick);
       },
 
