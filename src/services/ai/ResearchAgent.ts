@@ -39,7 +39,9 @@ Return as JSON with fields: sentiment_score, reliability, news_summary, upcoming
         throw new Error(`Perplexity API error: ${response.status}`);
       }
 
-      const data = await response.json();
+      const data = await response.json() as {
+        choices: Array<{ message: { content: string } }>;
+      };
       return this.parseResponse(data.choices[0].message.content);
 
     } catch (error) {
