@@ -1,18 +1,19 @@
 import OpenAI from 'openai';
 import { logger } from '../../utils/logger';
 import { config } from '../../config';
+import { ResearchOutput, TechnicalOutput, PredictorOutput, SignalDecision, AgentScores } from '../../types/signal';
 import { MarketRegime } from '../../types/market';
-import { SignalDecision, AgentOutputs } from '../../types/signal';
-import { ANTI_SCALPING } from '../../config/thresholds';
 
 interface OrchestratorInput {
   symbol: string;
-  assetType: 'forex' | 'stock' | 'crypto';
+  assetType: string;
   currentPrice: number;
   regime: MarketRegime;
+  researchOutput: ResearchOutput;
+  technicalOutput: TechnicalOutput;
+  predictorOutput: PredictorOutput;
   accountBalance: number;
-  riskPercent: number;
-  agentOutputs: AgentOutputs;
+  riskPerTrade: number;
 }
 
 export class MasterOrchestrator {
@@ -27,126 +28,89 @@ export class MasterOrchestrator {
   }
 
   async orchestrate(input: OrchestratorInput): Promise<SignalDecision> {
-    // Use direct OpenAI if available, otherwise fallback to Lovable AI
-    if (this.openai) {
-      return this.orchestrateWithOpenAI(input);
-    } else {
-      return this.orchestrateWithLovableAI(input);
+    if (!this.openai) {
+      logger.warn('OpenAI API key not configured for MasterOrchestrator');
+      return this.getHoldDecision(input.currentPrice, 'OpenAI not configured');
+    }
+
+    try {
+      return await this.orchestrateWithOpenAI(input);
+    } catch (error) {
+      logger.error('Master Orchestrator error:', error);
+      return this.getHoldDecision(input.currentPrice, 'Orchestration error');
     }
   }
 
   private async orchestrateWithOpenAI(input: OrchestratorInput): Promise<SignalDecision> {
-    try {
-      const response = await this.openai!.chat.completions.create({
-        model: 'gpt-5',
-        max_completion_tokens: 2000,
-        messages: [{
-          role: 'system',
-          content: this.getSystemPrompt(input.assetType)
-        }, {
-          role: 'user',
-          content: this.getUserPrompt(input)
-        }]
-      });
+    const response = await this.openai!.chat.completions.create({
+      model: config.ai.openai.model,
+      max_completion_tokens: 2048,
+      messages: [
+        { role: 'system', content: this.getSystemPrompt(input.assetType) },
+        { role: 'user', content: this.getUserPrompt(input) }
+      ]
+    });
 
-      return this.parseResponse(response.choices[0].message.content || '', input.currentPrice);
-
-    } catch (error) {
-      logger.error('Master Orchestrator (OpenAI) error:', error);
-      return this.getHoldDecision(input.currentPrice, `OpenAI error: ${(error as Error).message}`);
-    }
-  }
-
-  private async orchestrateWithLovableAI(input: OrchestratorInput): Promise<SignalDecision> {
-    try {
-      const response = await fetch(config.ai.lovable.url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.ai.lovable.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'openai/gpt-5',
-          messages: [{
-            role: 'system',
-            content: this.getSystemPrompt(input.assetType)
-          }, {
-            role: 'user',
-            content: this.getUserPrompt(input)
-          }]
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Lovable AI error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      return this.parseResponse(data.choices[0].message.content, input.currentPrice);
-
-    } catch (error) {
-      logger.error('Master Orchestrator (Lovable) error:', error);
-      return this.getHoldDecision(input.currentPrice, `Lovable AI error: ${(error as Error).message}`);
-    }
+    const content = response.choices[0].message.content || '';
+    return this.parseResponse(content, input.currentPrice);
   }
 
   private getSystemPrompt(assetType: string): string {
-    const rules = assetType === 'forex' || assetType === 'crypto'
-      ? ANTI_SCALPING.forex
-      : ANTI_SCALPING.stocks;
+    let antiScalpingRule: string;
+    if (assetType === 'forex') {
+      antiScalpingRule = '20 pips minimum for forex, 50 pips for metals (XAU/XAG)';
+    } else if (assetType === 'stock') {
+      antiScalpingRule = '0.5% minimum move for stocks';
+    } else {
+      antiScalpingRule = '1.0% minimum move for crypto';
+    }
 
-    return `You are the Master Orchestrator of an elite AI trading council.
-Synthesize inputs from Research, Technical, and Prediction agents to make final trading decisions.
+    return `You are the Master Trading Orchestrator for TAVY, synthesizing inputs from Research, Technical, and Prediction agents to make final trading decisions.
 
-CRITICAL RULES:
-- Minimum 60% confidence to trade
-- TP1 minimum ${rules.minTp1Pips || rules.minTp1Percent} ${rules.minTp1Pips ? 'pips' : '%'} (anti-scalping)
-- Risk:Reward must be >= ${rules.minRiskReward}:1
-- Reject low-reward setups that cannot survive execution costs
+CRITICAL TRADING RULES:
+1. Anti-scalping: TP1 must be at least ${antiScalpingRule}
+2. Risk/Reward: TP1 must be >= 1x the stop loss distance
+3. Confidence: Only recommend BUY/SELL if confidence >= 60%
+4. Regime alignment: Trade direction must align with market regime
 
-Return JSON only with exact fields:
+OUTPUT FORMAT (JSON only):
 {
   "action": "BUY" | "SELL" | "HOLD",
-  "confidence": number (0-100),
-  "entryPrice": number,
-  "stopLoss": number,
-  "takeProfit1": number,
-  "takeProfit2": number,
-  "takeProfit3": number,
-  "reasoning": string (concise explanation),
-  "agentScores": {
-    "research": number (0-100),
-    "technical": number (0-100),
-    "predictor": number (0-100)
-  },
-  "systemRecommendation": null | {
-    "urgency": "low" | "medium" | "high" | "critical",
-    "type": string,
-    "recommendation": string,
-    "can_auto_implement": boolean,
-    "suggested_values": object
+  "confidence": 0-100,
+  "entry_price": number,
+  "stop_loss": number,
+  "take_profit_1": number,
+  "take_profit_2": number,
+  "take_profit_3": number,
+  "reasoning": "string explaining the decision",
+  "agent_scores": {
+    "research": 0-100,
+    "technical": 0-100,
+    "predictor": 0-100
   }
 }`;
   }
 
   private getUserPrompt(input: OrchestratorInput): string {
-    return `Make a trading decision for ${input.symbol} (${input.assetType}):
+    return `Analyze and decide on ${input.symbol} (${input.assetType}):
 
-Current Price: ${input.currentPrice}
-Market Regime: ${input.regime.type} (${input.regime.direction}, strength: ${input.regime.strength}%)
-Account Balance: $${input.accountBalance}
-Risk Per Trade: ${input.riskPercent}%
+CURRENT PRICE: ${input.currentPrice}
+MARKET REGIME: ${JSON.stringify(input.regime)}
 
-Research Agent Output:
-${JSON.stringify(input.agentOutputs.research, null, 2)}
+RESEARCH AGENT OUTPUT:
+${JSON.stringify(input.researchOutput, null, 2)}
 
-Technical Agent Output:
-${JSON.stringify(input.agentOutputs.technical, null, 2)}
+TECHNICAL AGENT OUTPUT:
+${JSON.stringify(input.technicalOutput, null, 2)}
 
-Prediction Agent Output:
-${JSON.stringify(input.agentOutputs.predictor, null, 2)}
+PREDICTOR AGENT OUTPUT:
+${JSON.stringify(input.predictorOutput, null, 2)}
 
-Provide your final decision as JSON.`;
+ACCOUNT CONTEXT:
+- Balance: $${input.accountBalance}
+- Risk per trade: ${input.riskPerTrade}%
+
+Synthesize all inputs and provide your trading decision as JSON.`;
   }
 
   private parseResponse(content: string, currentPrice: number): SignalDecision {
@@ -154,24 +118,29 @@ Provide your final decision as JSON.`;
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
+        
+        const agentScores: AgentScores = {
+          research: parsed.agent_scores?.research || 50,
+          technical: parsed.agent_scores?.technical || 50,
+          predictor: parsed.agent_scores?.predictor || 50
+        };
+
         return {
           action: parsed.action || 'HOLD',
           confidence: parsed.confidence || 0,
-          entryPrice: parsed.entryPrice || currentPrice,
-          stopLoss: parsed.stopLoss || 0,
-          takeProfit1: parsed.takeProfit1 || 0,
-          takeProfit2: parsed.takeProfit2 || 0,
-          takeProfit3: parsed.takeProfit3 || 0,
-          reasoning: parsed.reasoning || 'No reasoning provided',
-          agentOutputs: {} as any,
-          agentScores: parsed.agentScores || { research: 0, technical: 0, predictor: 0 },
-          systemRecommendation: parsed.systemRecommendation
+          entryPrice: parsed.entry_price || currentPrice,
+          stopLoss: parsed.stop_loss || 0,
+          takeProfit1: parsed.take_profit_1 || 0,
+          takeProfit2: parsed.take_profit_2 || 0,
+          takeProfit3: parsed.take_profit_3 || 0,
+          reasoning: parsed.reasoning || content,
+          agentOutputs: {},
+          agentScores
         };
       }
-      throw new Error('No JSON found in response');
-    } catch (error) {
-      logger.error('Failed to parse orchestrator response:', content);
-      return this.getHoldDecision(currentPrice, 'Failed to parse AI response');
+      return this.getHoldDecision(currentPrice, 'Failed to parse response');
+    } catch {
+      return this.getHoldDecision(currentPrice, 'JSON parse error');
     }
   }
 
@@ -185,7 +154,7 @@ Provide your final decision as JSON.`;
       takeProfit2: 0,
       takeProfit3: 0,
       reasoning: reason,
-      agentOutputs: {} as any,
+      agentOutputs: {},
       agentScores: { research: 0, technical: 0, predictor: 0 }
     };
   }
