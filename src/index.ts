@@ -9,24 +9,88 @@ import { AlertManager } from './services/notifications/AlertManager';
 import { logger } from './utils/logger';
 import { FOREX_PAIRS } from './config/pairs';
 
-async function main() {
-  logger.info('🚀 Starting TAVY Brain v1.0...');
-  logger.info(`Environment: ${process.env.NODE_ENV}`);
-  logger.info(`Timezone: ${process.env.TZ || 'UTC'}`);
+// Track initialization state
+let initializationState = {
+  status: 'starting' as 'starting' | 'ready' | 'degraded' | 'failed',
+  supabase: false,
+  metaApi: false,
+  error: null as string | null,
+  subscribedPairs: 0,
+  openPositions: 0,
+  pendingSignals: 0
+};
 
+// START EXPRESS SERVER IMMEDIATELY (before any async work)
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Railway healthcheck - always return 200 immediately
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Detailed status endpoint for debugging
+app.get('/status', (req, res) => {
+  res.status(200).json({
+    ...initializationState,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
+  });
+});
+
+app.get('/', (req, res) => {
+  res.json({
+    name: 'TAVY Brain',
+    version: '1.0.0',
+    status: initializationState.status
+  });
+});
+
+// Start server immediately
+app.listen(PORT, () => {
+  logger.info(`Health check server running on port ${PORT}`);
+});
+
+logger.info('🚀 Starting TAVY Brain v1.0...');
+logger.info(`Environment: ${process.env.NODE_ENV}`);
+logger.info(`Timezone: ${process.env.TZ || 'UTC'}`);
+
+// Now do async initialization in background
+async function initialize() {
   // Validate required environment variables
   const requiredEnvVars = [
     'METAAPI_TOKEN',
     'METAAPI_ACCOUNT_ID',
     'SUPABASE_URL',
-    'SUPABASE_SERVICE_ROLE_KEY'
+    'SUPABASE_ANON_KEY',
+    'TAVY_SERVICE_EMAIL',
+    'TAVY_SERVICE_PASSWORD'
   ];
 
   for (const envVar of requiredEnvVars) {
     if (!process.env[envVar]) {
       logger.error(`Missing required environment variable: ${envVar}`);
-      process.exit(1);
+      initializationState.status = 'failed';
+      initializationState.error = `Missing env: ${envVar}`;
+      return;
     }
+  }
+
+  // Initialize Supabase with service account authentication
+  logger.info('Authenticating to Supabase...');
+  try {
+    await SupabaseManager.getInstance().initialize();
+    initializationState.supabase = true;
+    logger.info('Supabase authenticated');
+  } catch (error) {
+    logger.error('Supabase auth failed:', error);
+    initializationState.error = 'Supabase auth failed';
+    initializationState.status = 'degraded';
   }
 
   // Initialize services
@@ -42,11 +106,13 @@ async function main() {
     // Connect to MetaAPI WebSocket
     logger.info('Connecting to MetaAPI...');
     await metaApi.connect();
+    initializationState.metaApi = true;
 
     // Subscribe to forex pairs
     const pairs = process.env.FOREX_PAIRS?.split(',') || FOREX_PAIRS;
     logger.info(`Subscribing to ${pairs.length} pairs...`);
     await metaApi.subscribeToSymbols(pairs);
+    initializationState.subscribedPairs = pairs.length;
 
     // Initialize processors
     const signalProcessor = new SignalProcessor(metaApi, settings);
@@ -60,12 +126,18 @@ async function main() {
     // Handle disconnection
     metaApi.on('disconnected', async () => {
       logger.warn('MetaAPI disconnected');
+      initializationState.metaApi = false;
+      initializationState.status = 'degraded';
       await alertManager.alertDisconnection();
     });
 
     // Handle reconnection
     metaApi.on('connected', () => {
       logger.info('MetaAPI reconnected');
+      initializationState.metaApi = true;
+      if (initializationState.supabase) {
+        initializationState.status = 'ready';
+      }
     });
 
     // Subscribe to real-time settings updates
@@ -77,37 +149,10 @@ async function main() {
     // Start position monitor (checks SL/TP every 10 seconds)
     positionMonitor.start();
 
-    // Health check server
-    const app = express();
-    const PORT = process.env.PORT || 3000;
-
-    app.get('/health', (req, res) => {
-      const health = {
-        status: metaApi.isReady() ? 'ok' : 'degraded',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        websocket: metaApi.isReady(),
-        subscribedPairs: pairs.length,
-        openPositions: positionMonitor.getPositionCount(),
-        pendingSignals: signalProcessor.getPendingCount(),
-        memory: process.memoryUsage()
-      };
-
-      const statusCode = health.status === 'ok' ? 200 : 503;
-      res.status(statusCode).json(health);
-    });
-
-    app.get('/', (req, res) => {
-      res.json({
-        name: 'TAVY Brain',
-        version: '1.0.0',
-        status: 'running'
-      });
-    });
-
-    app.listen(PORT, () => {
-      logger.info(`Health check server running on port ${PORT}`);
-    });
+    // Update initialization state
+    initializationState.status = 'ready';
+    initializationState.openPositions = positionMonitor.getPositionCount();
+    initializationState.pendingSignals = signalProcessor.getPendingCount();
 
     // Graceful shutdown handlers
     const shutdown = async (signal: string) => {
@@ -147,14 +192,16 @@ async function main() {
     logger.info('✅ TAVY Brain is running and ready');
 
   } catch (error) {
-    logger.error('Fatal error during startup:', error);
-    await alertManager.sendAlert('critical', 'Startup Failed', (error as Error).message);
-    process.exit(1);
+    logger.error('Error during initialization:', error);
+    initializationState.error = (error as Error).message;
+    initializationState.status = 'degraded';
+    await alertManager.sendAlert('critical', 'Initialization Failed', (error as Error).message);
   }
 }
 
-// Start the application
-main().catch((error) => {
-  console.error('Fatal error:', error);
-  process.exit(1);
+// Start initialization in background (don't await - let Express run)
+initialize().catch((error) => {
+  logger.error('Fatal initialization error:', error);
+  initializationState.status = 'failed';
+  initializationState.error = error.message;
 });
