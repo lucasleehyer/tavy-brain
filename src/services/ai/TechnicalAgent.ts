@@ -4,34 +4,20 @@ import { Candle, Indicators, MarketRegime } from '../../types/market';
 import { TechnicalOutput } from '../../types/signal';
 
 export class TechnicalAgent {
-  private readonly apiUrl = config.ai.lovable.url;
-  private readonly model = 'google/gemini-2.5-flash';
+  private readonly apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
   async analyze(
     candles: Candle[],
     indicators: Indicators,
     regime: MarketRegime
   ): Promise<TechnicalOutput> {
-    if (!config.ai.lovable.apiKey) {
-      logger.warn('Lovable AI API key not configured');
+    if (!config.ai.google.apiKey) {
+      logger.warn('Google AI API key not configured');
       return this.getDefaultOutput();
     }
 
     try {
-      const response = await fetch(this.apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.ai.lovable.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: this.model,
-          messages: [{
-            role: 'system',
-            content: 'You are an expert technical analyst. Analyze the provided data and return JSON only.'
-          }, {
-            role: 'user',
-            content: `Analyze this technical data:
+      const prompt = `Analyze this technical data:
 Candles (last 20): ${JSON.stringify(candles.slice(-20))}
 Indicators: ${JSON.stringify(indicators)}
 Current Regime: ${JSON.stringify(regime)}
@@ -43,17 +29,36 @@ Return JSON with:
 - pattern_detected: string (e.g., "double bottom", "head and shoulders", "none")
 - entry_zone: { min: number, max: number }
 - confidence: 0-100
-- reasoning: string (brief explanation)`
-          }]
+- reasoning: string (brief explanation)`;
+
+      const response = await fetch(`${this.apiUrl}?key=${config.ai.google.apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: `You are an expert technical analyst. Analyze the provided data and return JSON only.\n\n${prompt}`
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 1024
+          }
         })
       });
 
       if (!response.ok) {
-        throw new Error(`Lovable AI error: ${response.status}`);
+        const errorText = await response.text();
+        throw new Error(`Google AI error: ${response.status} - ${errorText}`);
       }
 
-      const data = await response.json();
-      return this.parseResponse(data.choices[0].message.content);
+      const data = await response.json() as {
+        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+      };
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      return this.parseResponse(content);
 
     } catch (error) {
       logger.error('Technical Agent error:', error);
