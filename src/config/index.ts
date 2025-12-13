@@ -6,17 +6,19 @@ export const config = {
     region: 'london'
   },
 
-  // Supabase
+  // Supabase (using anon key + service account auth)
   supabase: {
     url: process.env.SUPABASE_URL!,
-    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!
+    anonKey: process.env.SUPABASE_ANON_KEY!,
+    serviceEmail: process.env.TAVY_SERVICE_EMAIL!,
+    servicePassword: process.env.TAVY_SERVICE_PASSWORD!
   },
 
   // AI Services
   ai: {
     openai: {
       apiKey: process.env.OPENAI_API_KEY,
-      model: 'gpt-5'
+      model: 'gpt-4o'
     },
     perplexity: {
       apiKey: process.env.PERPLEXITY_API_KEY,
@@ -29,6 +31,10 @@ export const config = {
     deepseek: {
       apiKey: process.env.DEEPSEEK_API_KEY,
       url: 'https://api.deepseek.com/v1/chat/completions'
+    },
+    google: {
+      apiKey: process.env.GOOGLE_API_KEY,
+      model: 'gemini-2.5-flash'
     }
   },
 
