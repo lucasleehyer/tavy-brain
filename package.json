@@ -1,0 +1,39 @@
+{
+  "name": "tavy-brain",
+  "version": "1.0.0",
+  "description": "TAVY Trading Brain - Real-time AI signal processing and execution",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:prod": "pm2-runtime ecosystem.config.js",
+    "lint": "eslint src/**/*.ts",
+    "test": "jest"
+  },
+  "dependencies": {
+    "metaapi.cloud-sdk": "^27.0.0",
+    "@supabase/supabase-js": "^2.86.2",
+    "openai": "^4.0.0",
+    "winston": "^3.11.0",
+    "pm2": "^5.3.0",
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1",
+    "date-fns": "^3.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/express": "^4.17.21",
+    "typescript": "^5.3.0",
+    "ts-node-dev": "^2.0.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "TAVY",
+  "license": "UNLICENSED",
+  "private": true
+}
