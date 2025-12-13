@@ -127,7 +127,30 @@ export class MetaApiManager extends EventEmitter {
 
       onPositionRemoved: (instanceIndex: string, positionId: string) => {
         this.emit('positionClosed', positionId);
-      }
+      },
+
+      // Required MetaAPI SDK callbacks
+      onBrokerConnectionStatusChanged: (instanceIndex: string, connected: boolean) => {
+        logger.info(`Broker connection status changed: ${connected ? 'connected' : 'disconnected'}`);
+      },
+
+      onHealthStatus: (instanceIndex: string, status: any) => {
+        logger.debug(`Health status update received`);
+      },
+
+      // Stub handlers to prevent TypeError for SDK-expected callbacks
+      onSynchronizationStarted: () => {},
+      onAccountInformationUpdated: () => {},
+      onSymbolSpecificationUpdated: () => {},
+      onSymbolSpecificationsUpdated: () => {},
+      onDealAdded: () => {},
+      onDealSynchronizationFinished: () => {},
+      onOrderAdded: () => {},
+      onOrderUpdated: () => {},
+      onOrderRemoved: () => {},
+      onOrderSynchronizationFinished: () => {},
+      onPositionsSynchronized: () => {},
+      onPendingOrdersSynchronized: () => {},
     });
   }
 
