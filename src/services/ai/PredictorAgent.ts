@@ -1,37 +1,40 @@
+import OpenAI from 'openai';
 import { logger } from '../../utils/logger';
 import { config } from '../../config';
 import { Candle } from '../../types/market';
 import { PredictorOutput } from '../../types/signal';
 
 export class PredictorAgent {
-  private readonly apiUrl = config.ai.lovable.url;
-  private readonly model = 'openai/gpt-5';
+  private openai: OpenAI | null = null;
+
+  constructor() {
+    if (config.ai.openai.apiKey) {
+      this.openai = new OpenAI({
+        apiKey: config.ai.openai.apiKey
+      });
+    }
+  }
 
   async predict(
     symbol: string,
     candles: Candle[],
     currentPrice: number
   ): Promise<PredictorOutput> {
-    if (!config.ai.lovable.apiKey) {
-      logger.warn('Lovable AI API key not configured');
+    if (!this.openai) {
+      logger.warn('OpenAI API key not configured for PredictorAgent');
       return this.getDefaultOutput();
     }
 
     try {
-      const response = await fetch(this.apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${config.ai.lovable.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: this.model,
-          messages: [{
-            role: 'system',
-            content: 'You are an expert price prediction model. Analyze price action and predict short-term movement. Return JSON only.'
-          }, {
-            role: 'user',
-            content: `Predict short-term price movement for ${symbol}:
+      const response = await this.openai.chat.completions.create({
+        model: config.ai.openai.model,
+        max_completion_tokens: 1024,
+        messages: [{
+          role: 'system',
+          content: 'You are an expert price prediction model. Analyze price action and predict short-term movement. Return JSON only.'
+        }, {
+          role: 'user',
+          content: `Predict short-term price movement for ${symbol}:
 Current Price: ${currentPrice}
 Recent Candles (last 30): ${JSON.stringify(candles.slice(-30))}
 
@@ -42,16 +45,11 @@ Return JSON with:
 - timeframe: string (e.g., "4 hours", "1 day")
 - support_levels: number[] (2-3 key support levels)
 - resistance_levels: number[] (2-3 key resistance levels)`
-          }]
-        })
+        }]
       });
 
-      if (!response.ok) {
-        throw new Error(`Lovable AI error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      return this.parseResponse(data.choices[0].message.content, currentPrice);
+      const content = response.choices[0].message.content || '';
+      return this.parseResponse(content, currentPrice);
 
     } catch (error) {
       logger.error('Predictor Agent error:', error);
