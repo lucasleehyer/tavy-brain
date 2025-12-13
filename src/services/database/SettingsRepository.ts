@@ -56,7 +56,7 @@ export class SettingsRepository {
     });
 
     this.cachedSettings.set(key, value);
-    logger.info(`Setting ${key} updated: ${oldValue} → ${value} (${reason})`);
+    logger.info('Setting ' + key + ' updated: ' + oldValue + ' → ' + value + ' (' + reason + ')');
   }
 
   getSetting(key: string): number | null {
@@ -68,6 +68,7 @@ export class SettingsRepository {
       .from('trading_accounts')
       .select('*')
       .eq('is_active', true)
+      .eq('is_frozen', false)
       .order('created_at', { ascending: true });
 
     if (error) {
@@ -78,18 +79,50 @@ export class SettingsRepository {
     return data || [];
   }
 
-  async getPriceSourceAccount(): Promise<any | null> {
+  async getPriceSourceAccount(): Promise<{ metaapi_account_id: string; account_name: string } | null> {
+    // First try price_source_accounts table
+    const { data: priceSource } = await this.supabase
+      .from('price_source_accounts')
+      .select('metaapi_account_id, account_name')
+      .eq('is_primary', true)
+      .maybeSingle();
+
+    if (priceSource) {
+      logger.info('Using price source from price_source_accounts: ' + priceSource.account_name);
+      return priceSource;
+    }
+
+    // Fallback to trading_accounts with is_price_source=true
+    const { data: tradingAccount } = await this.supabase
+      .from('trading_accounts')
+      .select('metaapi_account_id, account_name')
+      .eq('is_price_source', true)
+      .maybeSingle();
+
+    if (tradingAccount) {
+      logger.info('Using price source from trading_accounts: ' + tradingAccount.account_name);
+      return tradingAccount;
+    }
+
+    logger.warn('No price source account found in database');
+    return null;
+  }
+
+  async getActiveExecutionAccounts(): Promise<any[]> {
     const { data, error } = await this.supabase
       .from('trading_accounts')
       .select('*')
-      .eq('is_price_source', true)
-      .single();
+      .eq('is_active', true)
+      .eq('is_frozen', false)
+      .eq('is_price_source', false)
+      .order('created_at', { ascending: true });
 
     if (error) {
-      return null;
+      logger.error('Failed to get execution accounts:', error);
+      return [];
     }
 
-    return data;
+    return data || [];
   }
 
   private snakeToCamel(str: string): string {
