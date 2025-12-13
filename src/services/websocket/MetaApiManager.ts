@@ -11,6 +11,7 @@ export class MetaApiManager extends EventEmitter {
   private api: MetaApi;
   private connection: any;
   private account: any;
+  private accountId: string;
   private isConnected: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
@@ -18,8 +19,9 @@ export class MetaApiManager extends EventEmitter {
   private candleBuilder: CandleBuilder;
   private subscribedSymbols: string[] = [];
 
-  constructor() {
+  constructor(accountId?: string) {
     super();
+    this.accountId = accountId || config.metaapi.accountId;
     this.api = new MetaApi(config.metaapi.token);
     this.priceCache = new PriceCache();
     this.candleBuilder = new CandleBuilder();
@@ -27,10 +29,10 @@ export class MetaApiManager extends EventEmitter {
 
   async connect(): Promise<void> {
     try {
-      logger.info('Connecting to MetaAPI...');
+      logger.info(`Connecting to MetaAPI account ${this.accountId.slice(0, 8)}...`);
 
       this.account = await this.api.metatraderAccountApi
-        .getAccount(config.metaapi.accountId);
+        .getAccount(this.accountId);
 
       // Wait for account to be deployed
       logger.info('Waiting for account to be deployed...');
