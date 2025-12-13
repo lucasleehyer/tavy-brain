@@ -5,11 +5,13 @@ import { config } from '../../config';
 export class SupabaseManager {
   private client: SupabaseClient;
   private static instance: SupabaseManager;
+  private isAuthenticated = false;
 
   private constructor() {
+    // Use anon key instead of service role key
     this.client = createClient(
       config.supabase.url,
-      config.supabase.serviceRoleKey
+      config.supabase.anonKey
     );
   }
 
@@ -20,8 +22,37 @@ export class SupabaseManager {
     return SupabaseManager.instance;
   }
 
+  // Initialize with service account authentication
+  async initialize(): Promise<void> {
+    if (this.isAuthenticated) {
+      logger.info('Already authenticated to Supabase');
+      return;
+    }
+
+    try {
+      const { data, error } = await this.client.auth.signInWithPassword({
+        email: config.supabase.serviceEmail,
+        password: config.supabase.servicePassword
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      this.isAuthenticated = true;
+      logger.info(`Authenticated to Supabase as ${data.user?.email}`);
+    } catch (error) {
+      logger.error('Failed to authenticate to Supabase:', error);
+      throw error;
+    }
+  }
+
   getClient(): SupabaseClient {
     return this.client;
+  }
+
+  isReady(): boolean {
+    return this.isAuthenticated;
   }
 
   // Real-time settings subscription
