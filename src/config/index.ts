@@ -24,14 +24,6 @@ export const config = {
       apiKey: process.env.PERPLEXITY_API_KEY,
       model: 'sonar-pro'
     },
-    lovable: {
-      apiKey: process.env.LOVABLE_API_KEY,
-      url: 'https://ai.gateway.lovable.dev/v1/chat/completions'
-    },
-    deepseek: {
-      apiKey: process.env.DEEPSEEK_API_KEY,
-      url: 'https://api.deepseek.com/v1/chat/completions'
-    },
     google: {
       apiKey: process.env.GOOGLE_API_KEY,
       model: 'gemini-2.5-flash'
