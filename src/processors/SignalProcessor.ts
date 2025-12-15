@@ -1,200 +1,110 @@
 import { MetaApiManager } from '../services/websocket/MetaApiManager';
-import { PreFilter } from '../services/analysis/PreFilter';
-import { RegimeDetector } from '../services/analysis/RegimeDetector';
 import { AICouncil } from '../services/ai/AICouncil';
 import { ExecutionRouter } from '../services/execution/ExecutionRouter';
 import { SignalRepository } from '../services/database/SignalRepository';
-import { SettingsRepository } from '../services/database/SettingsRepository';
+import { PreFilter } from '../services/analysis/PreFilter';
+import { IndicatorCalculator } from '../services/analysis/IndicatorCalculator';
+import { RegimeDetector } from '../services/analysis/RegimeDetector';
+import { AlertManager } from '../services/notifications/AlertManager';
 import { logger } from '../utils/logger';
-import { Tick } from '../types/market';
-import { TradingThresholds } from '../config/thresholds';
-import { isForexMarketOpen, getCurrentSession } from '../utils/helpers';
-
-interface ProcessingState {
-  lastProcessed: Map<string, number>;
-  pendingAnalysis: Set<string>;
-  pendingCount: number;
-}
+import { Tick, TradingThresholds } from '../types';
 
 export class SignalProcessor {
   private metaApi: MetaApiManager;
-  private preFilter: PreFilter;
-  private regimeDetector: RegimeDetector;
   private aiCouncil: AICouncil;
   private executionRouter: ExecutionRouter;
   private signalRepo: SignalRepository;
-  private settingsRepo: SettingsRepository;
+  private preFilter: PreFilter;
+  private indicatorCalc: IndicatorCalculator;
+  private regimeDetector: RegimeDetector;
+  private alertManager: AlertManager;
   private settings: TradingThresholds;
-  private state: ProcessingState;
+  private userId: string;
+  
+  private lastAnalysis: Map<string, number> = new Map();
+  private analysisInterval = 60000; // 1 minute between analyses per symbol
+  private pendingSignals: number = 0;
   private isRunning: boolean = true;
 
-  // Minimum interval between processing same symbol (ms)
-  private readonly PROCESS_INTERVAL = 30000; // 30 seconds
-
-  constructor(metaApi: MetaApiManager, settings: TradingThresholds) {
+  constructor(metaApi: MetaApiManager, settings: TradingThresholds, userId: string) {
     this.metaApi = metaApi;
     this.settings = settings;
-    this.preFilter = new PreFilter({
-      minAtrPips: settings.minAtrPips,
-      momentumThresholdPips: settings.momentumThresholdPips
-    });
-    this.regimeDetector = new RegimeDetector();
+    this.userId = userId;
+    
     this.aiCouncil = new AICouncil();
-    this.signalRepo = new SignalRepository();
-    this.settingsRepo = new SettingsRepository();
-
-    // Initialize execution router
-    this.executionRouter = new ExecutionRouter(metaApi, {
-      masterAccountId: process.env.METAAPI_ACCOUNT_ID!,
-      userId: 'system', // Will be replaced with actual user ID
-      defaultRiskPercent: 5
-    });
-
-    this.state = {
-      lastProcessed: new Map(),
-      pendingAnalysis: new Set(),
-      pendingCount: 0
-    };
+    this.executionRouter = new ExecutionRouter();
+    this.signalRepo = new SignalRepository(userId);
+    this.preFilter = new PreFilter(settings);
+    this.indicatorCalc = new IndicatorCalculator();
+    this.regimeDetector = new RegimeDetector();
+    this.alertManager = new AlertManager();
+    
+    logger.info(`SignalProcessor initialized with userId: ${userId}`);
   }
 
   async processTick(tick: Tick): Promise<void> {
     if (!this.isRunning) return;
 
-    // Check if forex market is open
-    if (!isForexMarketOpen()) {
+    const symbol = tick.symbol;
+    const now = Date.now();
+    const lastTime = this.lastAnalysis.get(symbol) || 0;
+
+    // Only analyze each symbol every analysisInterval
+    if (now - lastTime < this.analysisInterval) {
       return;
     }
 
-    // Check if we recently processed this symbol
-    const lastProcessed = this.state.lastProcessed.get(tick.symbol) || 0;
-    if (Date.now() - lastProcessed < this.PROCESS_INTERVAL) {
-      return;
-    }
-
-    // Check if already being analyzed
-    if (this.state.pendingAnalysis.has(tick.symbol)) {
-      return;
-    }
-
-    // Mark as being processed
-    this.state.lastProcessed.set(tick.symbol, Date.now());
-    this.state.pendingAnalysis.add(tick.symbol);
+    this.lastAnalysis.set(symbol, now);
 
     try {
-      await this.analyzeSymbol(tick.symbol, tick);
-    } finally {
-      this.state.pendingAnalysis.delete(tick.symbol);
-    }
-  }
-
-  private async analyzeSymbol(symbol: string, tick: Tick): Promise<void> {
-    try {
-      // Get candles
-      const candles = this.metaApi.getCandles(symbol, '15m', 100);
+      // Get candles for analysis
+      const candles = this.metaApi.getCandles(symbol, 'M15', 100);
       if (candles.length < 50) {
-        return; // Not enough data
-      }
-
-      // Run pre-filter
-      const preFilterResult = this.preFilter.analyze(symbol, candles);
-
-      if (!preFilterResult.passed) {
-        // Log the rejection
-        await this.signalRepo.logDecision({
-          userId: 'system',
-          symbol,
-          assetType: 'forex',
-          decision: 'REJECTED',
-          decisionType: 'pre_filter',
-          confidence: 0,
-          narrative: preFilterResult.reason || 'Pre-filter rejected',
-          rejectionReason: preFilterResult.reason
-        });
+        logger.debug(`Not enough candles for ${symbol}: ${candles.length}`);
         return;
       }
 
-      // Check for duplicate pending signal
-      const hasDuplicate = await this.signalRepo.checkDuplicateSignal(symbol);
-      if (hasDuplicate) {
-        logger.info(`${symbol}: Skipping - pending signal already exists`);
-        return;
-      }
-
+      // Calculate indicators
+      const indicators = this.indicatorCalc.calculate(candles);
+      
       // Detect market regime
-      const regime = this.regimeDetector.detect(preFilterResult.indicators!);
+      const regime = this.regimeDetector.detect(candles, indicators);
 
-      // Get account info
+      // Pre-filter check
+      const preFilterResult = this.preFilter.check(symbol, candles, indicators, regime);
+      if (!preFilterResult.passed) {
+        logger.debug(`Pre-filter failed for ${symbol}: ${preFilterResult.reason}`);
+        return;
+      }
+
+      logger.info(`Pre-filter passed for ${symbol}, running AI Council analysis...`);
+
+      // Get account info for position sizing
       const accountInfo = await this.metaApi.getAccountInfo();
 
-      // Run AI Council
+      // Run AI Council analysis
       const decision = await this.aiCouncil.analyze({
         symbol,
         assetType: 'forex',
-        currentPrice: (tick.bid + tick.ask) / 2,
+        currentPrice: tick.bid,
         candles,
-        indicators: preFilterResult.indicators!,
+        indicators,
         regime,
         accountBalance: accountInfo.balance,
-        riskPercent: 5
+        riskPercent: this.settings.riskPercent || 5
       });
 
-      // Log the decision
-      await this.signalRepo.logDecision({
-        userId: 'system',
-        symbol,
-        assetType: 'forex',
-        decision: decision.action,
-        decisionType: 'ai_council',
-        confidence: decision.confidence,
-        narrative: decision.reasoning,
-        engineConsensus: decision.agentScores,
-        rejectionReason: decision.action === 'HOLD' ? decision.reasoning : undefined
-      });
-
-      // Execute if not HOLD and meets confidence threshold
-      if (decision.action !== 'HOLD' && decision.confidence >= this.settings.minConfidence) {
-        await this.executeSignal(symbol, decision, accountInfo.balance);
+      // Check confidence threshold
+      if (decision.action === 'HOLD' || decision.confidence < (this.settings.minConfidence || 60)) {
+        logger.info(`Signal rejected for ${symbol}: ${decision.action} @ ${decision.confidence}% confidence`);
+        return;
       }
 
-    } catch (error) {
-      logger.error(`Error analyzing ${symbol}:`, error);
-    }
-  }
+      logger.info(`Signal approved for ${symbol}: ${decision.action} @ ${decision.confidence}%`);
 
-  private async executeSignal(
-    symbol: string,
-    decision: any,
-    accountBalance: number
-  ): Promise<void> {
-    // Save signal first
-    const signalId = await this.signalRepo.saveSignal({
-      userId: 'system',
-      symbol,
-      assetType: 'forex',
-      action: decision.action,
-      confidence: decision.confidence,
-      entryPrice: decision.entryPrice,
-      stopLoss: decision.stopLoss,
-      takeProfit1: decision.takeProfit1,
-      takeProfit2: decision.takeProfit2,
-      takeProfit3: decision.takeProfit3,
-      reasoning: decision.reasoning,
-      source: 'forex_monitor',
-      marketRegime: decision.regime?.type,
-      agentOutputs: decision.agentOutputs,
-      snapshotSettings: this.settings
-    });
-
-    if (!signalId) {
-      logger.error('Failed to save signal, aborting execution');
-      return;
-    }
-
-    // Execute trade
-    const result = await this.executionRouter.executeTrade(
-      {
-        id: signalId,
-        userId: 'system',
+      // Save signal to database with proper userId
+      const signal = await this.signalRepo.saveSignal({
+        userId: this.userId,
         symbol,
         assetType: 'forex',
         action: decision.action,
@@ -202,33 +112,45 @@ export class SignalProcessor {
         entryPrice: decision.entryPrice,
         stopLoss: decision.stopLoss,
         takeProfit1: decision.takeProfit1,
+        takeProfit2: decision.takeProfit2,
+        takeProfit3: decision.takeProfit3,
         reasoning: decision.reasoning,
         source: 'forex_monitor',
-        snapshotSettings: this.settings
-      },
-      accountBalance
-    );
+        marketRegime: regime.type,
+        agentOutputs: decision.agentOutputs,
+        agentScores: decision.agentScores
+      });
 
-    if (!result.success) {
-      logger.error(`Trade execution failed for ${symbol}: ${result.error}`);
+      this.pendingSignals++;
+
+      // Execute trades on all active accounts
+      await this.executionRouter.executeSignal(signal, decision, this.userId);
+
+      // Send alert notification
+      await this.alertManager.alertSignalFired(
+        symbol,
+        decision.action,
+        decision.confidence,
+        `Entry: ${decision.entryPrice}, SL: ${decision.stopLoss}, TP1: ${decision.takeProfit1}`
+      );
+
+    } catch (error) {
+      logger.error(`Error processing tick for ${symbol}:`, error);
     }
   }
 
   updateSettings(newSettings: Partial<TradingThresholds>): void {
     this.settings = { ...this.settings, ...newSettings };
-    this.preFilter.updateThresholds({
-      minAtrPips: this.settings.minAtrPips,
-      momentumThresholdPips: this.settings.momentumThresholdPips
-    });
-    logger.info('Signal processor settings updated');
+    this.preFilter.updateThresholds(this.settings);
+    logger.info('SignalProcessor settings updated');
   }
 
   getPendingCount(): number {
-    return this.state.pendingAnalysis.size;
+    return this.pendingSignals;
   }
 
   stop(): void {
     this.isRunning = false;
-    logger.info('Signal processor stopped');
+    logger.info('SignalProcessor stopped');
   }
 }
