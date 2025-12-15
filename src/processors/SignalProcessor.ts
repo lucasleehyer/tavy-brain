@@ -6,6 +6,7 @@ import { PreFilter } from '../services/analysis/PreFilter';
 import { IndicatorCalculator } from '../services/analysis/IndicatorCalculator';
 import { RegimeDetector } from '../services/analysis/RegimeDetector';
 import { AlertManager } from '../services/notifications/AlertManager';
+import { activityLogger } from '../services/database/ActivityLogger';
 import { logger } from '../utils/logger';
 import { Tick, TradingThresholds } from '../types';
 
@@ -78,14 +79,20 @@ export class SignalProcessor {
       this.logStats();
     }, 30000);
     
-    logger.info(`✅ SignalProcessor initialized with userId: ${userId}`);
-    logger.info(`   Analysis interval: ${this.analysisInterval}ms`);
-    logger.info(`   Min confidence: ${this.settings.minConfidence || 60}%`);
+    logger.info(\`✅ SignalProcessor initialized with userId: \${userId}\`);
+    logger.info(\`   Analysis interval: \${this.analysisInterval}ms\`);
+    logger.info(\`   Min confidence: \${this.settings.minConfidence || 60}%\`);
   }
 
-  private logStats(): void {
-    const elapsed = (Date.now() - this.stats.lastProcessTime) / 1000;
-    logger.info(`📊 STATS | Ticks: ${this.stats.ticksReceived} | Throttled: ${this.stats.ticksThrottled} | PreFilter Pass/Fail: ${this.stats.preFilterPassed}/${this.stats.preFilterFailed} | AI Calls: ${this.stats.aiCouncilCalls} | Signals: ${this.stats.signalsGenerated} | Saved: ${this.stats.signalsSaved} | Trades: ${this.stats.tradesExecuted} | Errors: ${this.stats.errors} | Last: ${this.stats.lastSymbolProcessed}`);
+  private async logStats(): Promise<void> {
+    logger.info(\`📊 STATS | Ticks: \${this.stats.ticksReceived} | Throttled: \${this.stats.ticksThrottled} | PreFilter Pass/Fail: \${this.stats.preFilterPassed}/\${this.stats.preFilterFailed} | AI Calls: \${this.stats.aiCouncilCalls} | Signals: \${this.stats.signalsGenerated} | Saved: \${this.stats.signalsSaved} | Trades: \${this.stats.tradesExecuted} | Errors: \${this.stats.errors} | Last: \${this.stats.lastSymbolProcessed}\`);
+    
+    // Log scanning activity to dashboard
+    await activityLogger.logScanning(
+      this.stats.ticksReceived, 
+      this.stats.preFilterPassed, 
+      this.stats.signalsGenerated
+    );
   }
 
   async processTick(tick: Tick): Promise<void> {
@@ -106,45 +113,48 @@ export class SignalProcessor {
     }
 
     this.lastAnalysis.set(symbol, now);
-    logger.info(`🔍 Processing ${symbol} @ ${tick.bid}/${tick.ask} (spread: ${((tick.ask - tick.bid) * 10000).toFixed(1)} pips)`);
+    logger.info(\`🔍 Processing \${symbol} @ \${tick.bid}/\${tick.ask} (spread: \${((tick.ask - tick.bid) * 10000).toFixed(1)} pips)\`);
 
     try {
+      // Log that we're analyzing
+      await activityLogger.logAnalyzing(symbol);
+
       // Get candles for analysis
       const candles = this.metaApi.getCandles(symbol, 'M15', 100);
       if (candles.length < 50) {
         this.stats.candlesFailed++;
-        logger.warn(`⚠️ ${symbol}: Insufficient candles (${candles.length}/50 required)`);
+        logger.warn(\`⚠️ \${symbol}: Insufficient candles (\${candles.length}/50 required)\`);
         return;
       }
       
-      logger.debug(`📊 ${symbol}: Got ${candles.length} candles, latest close: ${candles[candles.length - 1]?.close}`);
+      logger.debug(\`📊 \${symbol}: Got \${candles.length} candles, latest close: \${candles[candles.length - 1]?.close}\`);
 
       // Calculate indicators
       const indicators = this.indicatorCalc.calculate(candles);
-      logger.debug(`📈 ${symbol}: RSI=${indicators.rsi?.toFixed(1)}, ATR=${indicators.atr?.toFixed(5)}`);
+      logger.debug(\`📈 \${symbol}: RSI=\${indicators.rsi?.toFixed(1)}, ATR=\${indicators.atr?.toFixed(5)}\`);
       
       // Detect market regime
       const regime = this.regimeDetector.detect(candles, indicators);
-      logger.debug(`🎯 ${symbol}: Regime=${regime.type}, Trend=${regime.trend}`);
+      logger.debug(\`🎯 \${symbol}: Regime=\${regime.type}, Trend=\${regime.trend}\`);
 
       // Pre-filter check
       const preFilterResult = this.preFilter.check(symbol, candles, indicators, regime);
       if (!preFilterResult.passed) {
         this.stats.preFilterFailed++;
-        logger.info(`❌ ${symbol}: Pre-filter FAILED - ${preFilterResult.reason}`);
+        logger.info(\`❌ \${symbol}: Pre-filter FAILED - \${preFilterResult.reason}\`);
         return;
       }
 
       this.stats.preFilterPassed++;
-      logger.info(`✅ ${symbol}: Pre-filter PASSED, running AI Council...`);
+      logger.info(\`✅ \${symbol}: Pre-filter PASSED, running AI Council...\`);
 
       // Get account info for position sizing
       const accountInfo = await this.metaApi.getAccountInfo();
-      logger.debug(`💰 Account: Balance=$${accountInfo.balance}, Equity=$${accountInfo.equity}`);
+      logger.debug(\`💰 Account: Balance=$\${accountInfo.balance}, Equity=$\${accountInfo.equity}\`);
 
       // Run AI Council analysis
       this.stats.aiCouncilCalls++;
-      logger.info(`🤖 ${symbol}: Calling AI Council with price ${tick.bid}...`);
+      logger.info(\`🤖 \${symbol}: Calling AI Council with price \${tick.bid}...\`);
       
       const decision = await this.aiCouncil.analyze({
         symbol,
@@ -157,22 +167,28 @@ export class SignalProcessor {
         riskPercent: this.settings.riskPercent || 5
       });
 
-      logger.info(`🤖 ${symbol}: AI Council returned: ${decision.action} @ ${decision.confidence}% confidence`);
-      logger.debug(`   Entry: ${decision.entryPrice}, SL: ${decision.stopLoss}, TP1: ${decision.takeProfit1}`);
+      logger.info(\`🤖 \${symbol}: AI Council returned: \${decision.action} @ \${decision.confidence}% confidence\`);
+      logger.debug(\`   Entry: \${decision.entryPrice}, SL: \${decision.stopLoss}, TP1: \${decision.takeProfit1}\`);
+
+      // Log decision to activity feed
+      await activityLogger.logDecision(symbol, decision.action, decision.confidence);
 
       // Check confidence threshold
       const minConfidence = this.settings.minConfidence || 60;
       if (decision.action === 'HOLD' || decision.confidence < minConfidence) {
-        logger.info(`⏸️ ${symbol}: Signal REJECTED - ${decision.action} at ${decision.confidence}% (min: ${minConfidence}%)`);
-        logger.info(`   Reason: ${decision.reasoning?.slice(0, 100)}...`);
+        logger.info(\`⏸️ \${symbol}: Signal REJECTED - \${decision.action} at \${decision.confidence}% (min: \${minConfidence}%)\`);
+        logger.info(\`   Reason: \${decision.reasoning?.slice(0, 100)}...\`);
         return;
       }
 
       this.stats.signalsGenerated++;
-      logger.info(`🎉 ${symbol}: Signal APPROVED - ${decision.action} @ ${decision.confidence}%`);
+      logger.info(\`🎉 \${symbol}: Signal APPROVED - \${decision.action} @ \${decision.confidence}%\`);
+
+      // Log signal to activity feed
+      await activityLogger.logSignal(symbol, decision.action, decision.confidence);
 
       // Save signal to database with proper userId
-      logger.info(`💾 ${symbol}: Saving signal to database with userId: ${this.userId}...`);
+      logger.info(\`💾 \${symbol}: Saving signal to database with userId: \${this.userId}...\`);
       
       const signal = await this.signalRepo.saveSignal({
         userId: this.userId,
@@ -194,25 +210,27 @@ export class SignalProcessor {
 
       if (signal) {
         this.stats.signalsSaved++;
-        logger.info(`✅ ${symbol}: Signal SAVED to database with ID: ${signal.id}`);
+        logger.info(\`✅ \${symbol}: Signal SAVED to database with ID: \${signal.id}\`);
       } else {
-        logger.error(`❌ ${symbol}: Failed to save signal to database!`);
+        logger.error(\`❌ \${symbol}: Failed to save signal to database!\`);
       }
 
       this.pendingSignals++;
 
       // Execute trades on all active accounts
-      logger.info(`🚀 ${symbol}: Executing trades on active accounts...`);
+      logger.info(\`🚀 \${symbol}: Executing trades on active accounts...\`);
       const execResults = await this.executionRouter.executeSignal(signal, decision, this.userId);
       
       if (execResults && execResults.length > 0) {
         this.stats.tradesExecuted += execResults.length;
-        logger.info(`✅ ${symbol}: Executed ${execResults.length} trades`);
+        logger.info(\`✅ \${symbol}: Executed \${execResults.length} trades\`);
         for (const result of execResults) {
-          logger.info(`   Account: ${result.accountName}, Position: ${result.positionId}, Price: ${result.price}`);
+          logger.info(\`   Account: \${result.accountName}, Position: \${result.positionId}, Price: \${result.price}\`);
+          // Log trade to activity feed
+          await activityLogger.logTrade(symbol, result.accountName, decision.action);
         }
       } else {
-        logger.warn(`⚠️ ${symbol}: No trades executed (check account balances/status)`);
+        logger.warn(\`⚠️ \${symbol}: No trades executed (check account balances/status)\`);
       }
 
       // Send alert notification
@@ -220,19 +238,20 @@ export class SignalProcessor {
         symbol,
         decision.action,
         decision.confidence,
-        `Entry: ${decision.entryPrice}, SL: ${decision.stopLoss}, TP1: ${decision.takeProfit1}`
+        \`Entry: \${decision.entryPrice}, SL: \${decision.stopLoss}, TP1: \${decision.takeProfit1}\`
       );
 
     } catch (error) {
       this.stats.errors++;
-      logger.error(`💥 ERROR processing ${symbol}:`, error);
+      logger.error(\`💥 ERROR processing \${symbol}:\`, error);
+      await activityLogger.logError(\`Error analyzing \${symbol}\`, { error: (error as Error).message });
     }
   }
 
   updateSettings(newSettings: Partial<TradingThresholds>): void {
     this.settings = { ...this.settings, ...newSettings };
     this.preFilter.updateThresholds(this.settings);
-    logger.info(`⚙️ SignalProcessor settings updated: minConfidence=${this.settings.minConfidence}`);
+    logger.info(\`⚙️ SignalProcessor settings updated: minConfidence=\${this.settings.minConfidence}\`);
   }
 
   getPendingCount(): number {
