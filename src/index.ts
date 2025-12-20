@@ -6,6 +6,7 @@ import { PositionMonitor } from './processors/PositionMonitor';
 import { SupabaseManager } from './services/database/SupabaseClient';
 import { SettingsRepository } from './services/database/SettingsRepository';
 import { AlertManager } from './services/notifications/AlertManager';
+import { ThresholdOptimizer } from './services/ai/ThresholdOptimizer';
 import { logger } from './utils/logger';
 import { FOREX_PAIRS } from './config/pairs';
 
@@ -167,6 +168,9 @@ async function initialize() {
     // Start position monitor (checks SL/TP every 10 seconds)
     positionMonitor.start();
 
+    // Schedule weekly threshold optimization (Sunday 23:00 UTC)
+    scheduleWeeklyOptimization();
+
     // Update initialization state
     initializationState.status = 'ready';
     initializationState.openPositions = positionMonitor.getPositionCount();
@@ -215,6 +219,35 @@ async function initialize() {
     initializationState.status = 'degraded';
     await alertManager.sendAlert('critical', 'Initialization Failed', (error as Error).message);
   }
+}
+
+// Weekly threshold optimization scheduler
+function scheduleWeeklyOptimization() {
+  let lastRunDate: string | null = null; // Prevent duplicate runs on same day
+
+  const checkAndRunOptimization = async () => {
+    const now = new Date();
+    const dayOfWeek = now.getUTCDay(); // 0 = Sunday
+    const hour = now.getUTCHours();
+    const todayKey = now.toISOString().split('T')[0]; // YYYY-MM-DD
+
+    // Run on Sunday at 23:00 UTC, but only once per day
+    if (dayOfWeek === 0 && hour === 23 && lastRunDate !== todayKey) {
+      lastRunDate = todayKey; // Mark as run for today
+      logger.info('🧠 Running scheduled weekly threshold optimization...');
+      try {
+        const optimizer = new ThresholdOptimizer();
+        const result = await optimizer.runOptimization();
+        logger.info(`Optimization complete: ${result.status}, ${result.appliedChanges.length} changes applied`);
+      } catch (error) {
+        logger.error('Weekly optimization failed:', error);
+      }
+    }
+  };
+
+  // Check every 15 minutes (reduces unnecessary checks)
+  setInterval(checkAndRunOptimization, 15 * 60 * 1000);
+  logger.info('📅 Weekly threshold optimization scheduled for Sundays 23:00 UTC');
 }
 
 // Start initialization in background (don't await - let Express run)

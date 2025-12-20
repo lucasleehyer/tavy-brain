@@ -2,17 +2,26 @@ import { logger } from '../../utils/logger';
 import { config } from '../../config';
 import { Candle, Indicators, MarketRegime } from '../../types/market';
 import { TechnicalOutput } from '../../types/signal';
+import { DeepSeekClient } from './DeepSeekClient';
 
 export class TechnicalAgent {
-  private readonly apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+  private client: DeepSeekClient | null = null;
+
+  private getClient(): DeepSeekClient | null {
+    if (!this.client && config.ai.deepseek?.apiKey) {
+      this.client = new DeepSeekClient(config.ai.deepseek.apiKey);
+    }
+    return this.client;
+  }
 
   async analyze(
     candles: Candle[],
     indicators: Indicators,
     regime: MarketRegime
   ): Promise<TechnicalOutput> {
-    if (!config.ai.google.apiKey) {
-      logger.warn('Google AI API key not configured');
+    const client = this.getClient();
+    if (!client) {
+      logger.warn('DeepSeek API key not configured');
       return this.getDefaultOutput();
     }
 
@@ -31,34 +40,15 @@ Return JSON with:
 - confidence: 0-100
 - reasoning: string (brief explanation)`;
 
-      const response = await fetch(`${this.apiUrl}?key=${config.ai.google.apiKey}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `You are an expert technical analyst. Analyze the provided data and return JSON only.\n\n${prompt}`
-            }]
-          }],
-          generationConfig: {
-            temperature: 0.7,
-            maxOutputTokens: 1024
-          }
-        })
-      });
+      const response = await client.chat(
+        [
+          { role: 'system', content: 'You are an expert technical analyst. Analyze the provided data and return JSON only.' },
+          { role: 'user', content: prompt }
+        ],
+        { model: 'deepseek-chat', temperature: 0.3, maxTokens: 1024 }
+      );
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Google AI error: ${response.status} - ${errorText}`);
-      }
-
-      const data = await response.json() as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      return this.parseResponse(content);
+      return this.parseResponse(response.content);
 
     } catch (error) {
       logger.error('Technical Agent error:', error);

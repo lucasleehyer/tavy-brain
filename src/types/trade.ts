@@ -56,4 +56,5 @@ export interface ExecutionResult {
   entryPrice?: number;
   error?: string;
   accountId?: string;
+  accountName?: string;
 }

@@ -9,24 +9,25 @@ export interface TradingThresholds {
   consecutiveLossSizeReductionPct: number;
 }
 
+// OPTIMIZED for 30% monthly target with balanced trade frequency
 export const DEFAULT_THRESHOLDS: TradingThresholds = {
-  minConfidence: 70,        // Increased from 60 - higher quality signals
+  minConfidence: 70,        // Keep high - quality over quantity
   minAtrPips: 5,
-  momentumThresholdPips: 8,
+  momentumThresholdPips: 6, // Reduced from 8 - catch earlier moves
   dailyLossLimitPct: 10,
   weeklyLossLimitPct: 20,
   maxConsecutiveLosses: 5,
   consecutiveLossSizeReductionPct: 0
 };
 
-// Pre-filter thresholds
+// Pre-filter thresholds - OPTIMIZED for 30% monthly target
 export const PREFILTER_THRESHOLDS = {
   // RSI thresholds
   rsiOversold: 30,
   rsiOverbought: 70,
 
-  // ADX threshold for trending market
-  adxTrending: 25,
+  // ADX threshold for trending market (reduced from 25 to catch more trends)
+  adxTrending: 22,
 
   // Minimum candles for analysis
   minCandles: 50,

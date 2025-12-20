@@ -2,6 +2,7 @@ import { logger } from '../../utils/logger';
 import { config } from '../../config';
 import { ResearchOutput, TechnicalOutput, PredictorOutput, SignalDecision, AgentScores } from '../../types/signal';
 import { MarketRegime } from '../../types/market';
+import { DeepSeekClient } from './DeepSeekClient';
 
 interface OrchestratorInput {
   symbol: string;
@@ -18,51 +19,46 @@ interface OrchestratorInput {
 }
 
 export class MasterOrchestrator {
-  private readonly apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent';
+  private client: DeepSeekClient | null = null;
+
+  private getClient(): DeepSeekClient | null {
+    if (!this.client && config.ai.deepseek?.apiKey) {
+      this.client = new DeepSeekClient(config.ai.deepseek.apiKey);
+    }
+    return this.client;
+  }
 
   async orchestrate(input: OrchestratorInput): Promise<SignalDecision> {
-    if (!config.ai.google.apiKey) {
-      logger.warn('Google API key not configured for MasterOrchestrator');
-      return this.getHoldDecision(input.currentPrice, 'Google API not configured');
+    const client = this.getClient();
+    if (!client) {
+      logger.warn('DeepSeek API key not configured for MasterOrchestrator');
+      return this.getHoldDecision(input.currentPrice, 'DeepSeek API not configured');
     }
 
     try {
-      return await this.orchestrateWithGemini(input);
+      return await this.orchestrateWithDeepSeek(input, client);
     } catch (error) {
       logger.error('Master Orchestrator error:', error);
       return this.getHoldDecision(input.currentPrice, 'Orchestration error');
     }
   }
 
-  private async orchestrateWithGemini(input: OrchestratorInput): Promise<SignalDecision> {
-    const response = await fetch(`${this.apiUrl}?key=${config.ai.google.apiKey}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        contents: [{
-          parts: [{
-            text: `${this.getSystemPrompt(input.assetType)}\n\n${this.getUserPrompt(input)}`
-          }]
-        }],
-        generationConfig: {
-          temperature: 0.2,
-          maxOutputTokens: 2048
-        }
-      })
-    });
+  private async orchestrateWithDeepSeek(input: OrchestratorInput, client: DeepSeekClient): Promise<SignalDecision> {
+    // Use deepseek-reasoner for critical trading decisions (thinking mode)
+    const response = await client.chat(
+      [
+        { role: 'system', content: this.getSystemPrompt(input.assetType) },
+        { role: 'user', content: this.getUserPrompt(input) }
+      ],
+      { model: 'deepseek-reasoner', temperature: 0.2, maxTokens: 4096 }
+    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+    // Log the reasoning process if available
+    if (response.reasoningContent) {
+      logger.debug('DeepSeek Reasoner thinking:', response.reasoningContent.slice(0, 500));
     }
 
-    const data = await response.json() as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-    };
-    const content = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    return this.parseResponse(content, input.currentPrice);
+    return this.parseResponse(response.content, input.currentPrice);
   }
 
   private getSystemPrompt(assetType: string): string {

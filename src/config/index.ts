@@ -16,17 +16,22 @@ export const config = {
 
   // AI Services
   ai: {
-    openai: {
-      apiKey: process.env.OPENAI_API_KEY,
-      model: 'gpt-4o'
+    deepseek: {
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      chatModel: 'deepseek-chat',        // V3.2 for technical/predictor
+      reasonerModel: 'deepseek-reasoner' // For critical decisions
     },
     perplexity: {
       apiKey: process.env.PERPLEXITY_API_KEY,
-      model: 'sonar-pro'
+      model: 'sonar-pro'  // Keep for ResearchAgent (real-time web)
     },
     google: {
       apiKey: process.env.GOOGLE_API_KEY,
-      model: 'gemini-2.5-flash'
+      model: 'gemini-2.5-flash'  // Fallback only
+    },
+    openai: {
+      apiKey: process.env.OPENAI_API_KEY,
+      model: 'gpt-4o'  // Fallback only
     }
   },
 

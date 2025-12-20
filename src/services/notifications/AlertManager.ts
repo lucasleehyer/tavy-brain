@@ -36,8 +36,8 @@ export class AlertManager {
         return false;
       }
 
-      const result = await response.json();
-      logger.info(`Alert sent via Supabase: ${result.emailsSent} emails delivered`);
+      const result = await response.json() as { emailsSent?: number };
+      logger.info(`Alert sent via Supabase: ${result.emailsSent ?? 0} emails delivered`);
       return true;
     } catch (error) {
       logger.error('Failed to send alert to Supabase:', error);
@@ -95,13 +95,14 @@ export class AlertManager {
     });
   }
 
-  async alertSignalFired(symbol: string, action: string, confidence: number): Promise<void> {
-    logger.info(`[ALERT] Signal fired: ${action} ${symbol} at ${confidence}% confidence`);
+  async alertSignalFired(symbol: string, action: string, confidence: number, details?: string): Promise<void> {
+    logger.info(`[ALERT] Signal fired: ${action} ${symbol} at ${confidence}% confidence${details ? ` - ${details}` : ''}`);
     await this.sendToSupabase({
       type: 'signal_fired',
       symbol,
       action,
       confidence,
+      details,
     });
   }
 

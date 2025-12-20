@@ -172,20 +172,30 @@ export class ExecutionRouter {
 
   async closeTrade(positionId: string, tradeId: string, exitPrice: number): Promise<boolean> {
     try {
-      await this.metaApi.closeTrade(positionId);
-
-      // Get trade details for P&L calculation
+      // Get trade details first to find the correct account
       const trade = await this.tradeRepo.getTradeByMtPositionId(positionId);
-      if (trade) {
-        const pnl = this.calculatePnl(trade, exitPrice);
-        await this.tradeRepo.closeTrade(tradeId, exitPrice, pnl.dollars, pnl.percent);
-
-        await this.alertManager.alertTradeClosed(
-          trade.symbol,
-          pnl.dollars,
-          pnl.dollars >= 0 ? 'win' : 'loss'
-        );
+      if (!trade) {
+        logger.error(`Trade not found for position ${positionId}`);
+        return false;
       }
+
+      // Get the MetaAPI connection for this account
+      const metaApi = this.accountConnections.get(trade.metaapi_account_id);
+      if (!metaApi) {
+        logger.error(`No MetaAPI connection for account ${trade.metaapi_account_id}`);
+        return false;
+      }
+
+      await metaApi.closeTrade(positionId);
+
+      const pnl = this.calculatePnl(trade, exitPrice);
+      await this.tradeRepo.closeTrade(tradeId, exitPrice, pnl.dollars, pnl.percent);
+
+      await this.alertManager.alertTradeClosed(
+        trade.symbol,
+        pnl.dollars,
+        pnl.dollars >= 0 ? 'win' : 'loss'
+      );
 
       return true;
 

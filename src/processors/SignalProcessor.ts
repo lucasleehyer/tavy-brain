@@ -55,8 +55,7 @@ export class SignalProcessor {
     this.settingsRepo = new SettingsRepository();
 
     // Initialize execution router with default risk (will be overridden from DB)
-    this.executionRouter = new ExecutionRouter(metaApi, {
-      masterAccountId: process.env.METAAPI_ACCOUNT_ID!,
+    this.executionRouter = new ExecutionRouter({
       userId: 'system',
       defaultRiskPercent: 10 // Default, will be read from DB
     });
@@ -270,30 +269,33 @@ export class SignalProcessor {
     // Update execution router with current risk percent
     this.executionRouter.updateRiskPercent(riskPercent);
 
-    // Execute trade
-    const result = await this.executionRouter.executeTrade(
-      {
-        id: signalId,
-        userId: 'system',
-        symbol,
-        assetType: 'forex',
-        action: decision.action,
-        confidence: decision.confidence,
-        entryPrice: decision.entryPrice,
-        stopLoss: decision.stopLoss,
-        takeProfit1: decision.takeProfit1,
-        reasoning: decision.reasoning,
-        source: 'forex_monitor',
-        snapshotSettings: { ...this.settings, riskPercent }
-      },
-      accountBalance
-    );
+    // Execute trade (returns array of results for all accounts)
+    const results = await this.executionRouter.executeTrade({
+      id: signalId,
+      userId: 'system',
+      symbol,
+      assetType: 'forex',
+      action: decision.action,
+      confidence: decision.confidence,
+      entryPrice: decision.entryPrice,
+      stopLoss: decision.stopLoss,
+      takeProfit1: decision.takeProfit1,
+      reasoning: decision.reasoning,
+      source: 'forex_monitor',
+      snapshotSettings: { ...this.settings, riskPercent }
+    });
 
-    if (result.success) {
-      await activityLogger.logTrade(symbol, 'Primary Account', decision.action);
-    } else {
-      logger.error(`Trade execution failed for ${symbol}: ${result.error}`);
-      await activityLogger.logError(`Trade execution failed for ${symbol}`, { error: result.error });
+    const successCount = results.filter(r => r.success).length;
+    const failedResults = results.filter(r => !r.success);
+
+    if (successCount > 0) {
+      await activityLogger.logTrade(symbol, `${successCount} account(s)`, decision.action);
+    }
+    
+    if (failedResults.length > 0) {
+      const errors = failedResults.map(r => `${r.accountName || 'Unknown'}: ${r.error}`).join('; ');
+      logger.error(`Trade execution failed on ${failedResults.length} account(s) for ${symbol}: ${errors}`);
+      await activityLogger.logError(`Trade execution failed for ${symbol}`, { error: errors });
     }
   }
 

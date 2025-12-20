@@ -1,4 +1,4 @@
-// Forex pairs to monitor
+// Forex pairs to monitor - OPTIMIZED with high-volatility pairs prioritized
 export const FOREX_PAIRS = [
   // Major pairs
   'EURUSD',
@@ -9,24 +9,26 @@ export const FOREX_PAIRS = [
   'NZDUSD',
   'USDCAD',
 
-  // Cross pairs
-  'EURGBP',
+  // HIGH VOLATILITY Cross pairs (prioritized for 30% target)
+  'GBPNZD',   // Very high volatility
+  'GBPAUD',   // Very high volatility
+  'EURNZD',   // High volatility
+  'GBPJPY',   // High volatility
   'EURJPY',
-  'GBPJPY',
   'EURAUD',
-  'EURNZD',
-  'EURCAD',
-  'EURCHF',
-  'GBPAUD',
-  'GBPNZD',
   'GBPCAD',
   'GBPCHF',
-  'AUDNZD',
   'AUDJPY',
   'NZDJPY',
   'CADJPY',
+  
+  // Lower volatility crosses (still monitored)
+  'EURGBP',
+  'EURCAD',
+  'EURCHF',
+  'AUDNZD',
 
-  // Metals
+  // Metals (high volatility)
   'XAUUSD',
   'XAGUSD'
 ];
