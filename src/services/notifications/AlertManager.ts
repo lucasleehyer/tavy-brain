@@ -1,13 +1,48 @@
-import { EmailService } from './EmailService';
 import { logger } from '../../utils/logger';
+import { config } from '../../config';
 
 type AlertLevel = 'info' | 'warning' | 'critical';
 
 export class AlertManager {
-  private emailService: EmailService;
+  private supabaseUrl: string;
+  private supabaseAnonKey: string;
 
   constructor() {
-    this.emailService = new EmailService();
+    this.supabaseUrl = config.supabase.url;
+    this.supabaseAnonKey = config.supabase.anonKey;
+  }
+
+  /**
+   * Send alert to Supabase edge function for email delivery
+   * All emails now go through Supabase for centralized configuration
+   */
+  private async sendToSupabase(payload: Record<string, any>): Promise<boolean> {
+    try {
+      const response = await fetch(
+        `${this.supabaseUrl}/functions/v1/send-alert-notification`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.supabaseAnonKey}`,
+          },
+          body: JSON.stringify(payload),
+        }
+      );
+
+      if (!response.ok) {
+        const error = await response.text();
+        logger.error('Supabase alert function error:', error);
+        return false;
+      }
+
+      const result = await response.json();
+      logger.info(`Alert sent via Supabase: ${result.emailsSent} emails delivered`);
+      return true;
+    } catch (error) {
+      logger.error('Failed to send alert to Supabase:', error);
+      return false;
+    }
   }
 
   async sendAlert(
@@ -19,65 +54,55 @@ export class AlertManager {
     logger.log(logLevel, `[ALERT] ${title}: ${message}`);
 
     if (level === 'critical' || level === 'warning') {
-      try {
-        await this.emailService.send({
-          subject: `[TAVY ${level.toUpperCase()}] ${title}`,
-          html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px;">
-              <h2 style="color: ${level === 'critical' ? '#dc2626' : '#f59e0b'};">${title}</h2>
-              <p style="color: #374151; font-size: 16px;">${message}</p>
-              <hr style="border: 1px solid #e5e7eb; margin: 20px 0;" />
-              <p style="color: #6b7280; font-size: 12px;">
-                Time: ${new Date().toISOString()}<br/>
-                Environment: ${process.env.NODE_ENV || 'development'}
-              </p>
-            </div>
-          `
-        });
-      } catch (error) {
-        logger.error('Failed to send alert email:', error);
-      }
+      await this.sendToSupabase({
+        type: 'generic_alert',
+        level,
+        title,
+        message,
+      });
     }
   }
 
   async alertDisconnection(): Promise<void> {
-    await this.sendAlert(
-      'critical',
-      'MetaAPI Disconnected',
-      'WebSocket connection to MetaAPI has been lost. Attempting to reconnect automatically. Check the VPS status if this persists.'
-    );
+    logger.error('[ALERT] MetaAPI Disconnected');
+    await this.sendToSupabase({
+      type: 'metaapi_disconnection',
+    });
   }
 
   async alertReconnected(): Promise<void> {
-    await this.sendAlert(
-      'info',
-      'MetaAPI Reconnected',
-      'WebSocket connection to MetaAPI has been restored. Trading operations resuming.'
-    );
+    logger.info('[ALERT] MetaAPI Reconnected');
+    await this.sendToSupabase({
+      type: 'metaapi_reconnected',
+    });
   }
 
   async alertTradeFailure(symbol: string, error: string): Promise<void> {
-    await this.sendAlert(
-      'critical',
-      'Trade Execution Failed',
-      `Failed to execute trade for ${symbol}: ${error}`
-    );
+    logger.error(`[ALERT] Trade execution failed for ${symbol}: ${error}`);
+    await this.sendToSupabase({
+      type: 'trade_failure',
+      symbol,
+      error,
+    });
   }
 
   async alertEquityLimit(limitType: string, currentPct: number): Promise<void> {
-    await this.sendAlert(
-      'critical',
-      'Equity Protection Triggered',
-      `${limitType} limit reached. Current: ${currentPct.toFixed(2)}%. Trading has been paused for safety.`
-    );
+    logger.error(`[ALERT] Equity protection triggered: ${limitType} at ${currentPct.toFixed(2)}%`);
+    await this.sendToSupabase({
+      type: 'equity_limit',
+      limitType,
+      currentPct,
+    });
   }
 
   async alertSignalFired(symbol: string, action: string, confidence: number): Promise<void> {
-    await this.sendAlert(
-      'info',
-      'Signal Fired',
-      `${action} signal for ${symbol} at ${confidence}% confidence. Trade execution attempted.`
-    );
+    logger.info(`[ALERT] Signal fired: ${action} ${symbol} at ${confidence}% confidence`);
+    await this.sendToSupabase({
+      type: 'signal_fired',
+      symbol,
+      action,
+      confidence,
+    });
   }
 
   async alertTradeClosed(
@@ -86,10 +111,12 @@ export class AlertManager {
     outcome: 'win' | 'loss'
   ): Promise<void> {
     const emoji = outcome === 'win' ? '✅' : '❌';
-    await this.sendAlert(
-      'info',
-      `Trade Closed ${emoji}`,
-      `${symbol} closed with ${outcome.toUpperCase()}. P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`
-    );
+    logger.info(`[ALERT] Trade closed ${emoji}: ${symbol} with ${outcome.toUpperCase()}, P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`);
+    await this.sendToSupabase({
+      type: 'trade_closed',
+      symbol,
+      pnl,
+      outcome,
+    });
   }
 }

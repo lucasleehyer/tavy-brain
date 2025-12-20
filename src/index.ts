@@ -17,10 +17,7 @@ let initializationState = {
   error: null as string | null,
   subscribedPairs: 0,
   openPositions: 0,
-  pendingSignals: 0,
-  priceSource: '' as string,
-  executionAccounts: 0,
-  userId: '' as string
+  pendingSignals: 0
 };
 
 // START EXPRESS SERVER IMMEDIATELY (before any async work)
@@ -49,10 +46,8 @@ app.get('/status', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'TAVY Brain',
-    version: '2.1.0',
-    status: initializationState.status,
-    priceSource: initializationState.priceSource,
-    executionAccounts: initializationState.executionAccounts
+    version: '1.0.0',
+    status: initializationState.status
   });
 });
 
@@ -61,13 +56,13 @@ app.listen(PORT, () => {
   logger.info(`Health check server running on port ${PORT}`);
 });
 
-logger.info('🚀 Starting TAVY Brain v2.1 (userId Fix)...');
+logger.info('🚀 Starting TAVY Brain v1.0...');
 logger.info(`Environment: ${process.env.NODE_ENV}`);
 logger.info(`Timezone: ${process.env.TZ || 'UTC'}`);
 
 // Now do async initialization in background
 async function initialize() {
-  // Validate required environment variables (METAAPI_ACCOUNT_ID now optional - reads from DB)
+  // Validate required environment variables (METAAPI_ACCOUNT_ID now optional - read from DB)
   const requiredEnvVars = [
     'METAAPI_TOKEN',
     'SUPABASE_URL',
@@ -87,20 +82,14 @@ async function initialize() {
 
   // Initialize Supabase with service account authentication
   logger.info('Authenticating to Supabase...');
-  const supabaseManager = SupabaseManager.getInstance();
   try {
-    await supabaseManager.initialize();
+    await SupabaseManager.getInstance().initialize();
     initializationState.supabase = true;
-    
-    // Get the authenticated user's ID for database operations
-    const userId = supabaseManager.getUserId();
-    initializationState.userId = userId;
-    logger.info(`Supabase authenticated with userId: ${userId}`);
+    logger.info('Supabase authenticated');
   } catch (error) {
     logger.error('Supabase auth failed:', error);
     initializationState.error = 'Supabase auth failed';
     initializationState.status = 'degraded';
-    return; // Cannot continue without Supabase auth
   }
 
   // Initialize settings repository first to get price source
@@ -120,8 +109,7 @@ async function initialize() {
       throw new Error('No price source account configured in database or environment');
     }
 
-    initializationState.priceSource = priceSourceAccount?.account_name || 'ENV fallback';
-    logger.info(`Using price source: ${initializationState.priceSource} (${priceSourceAccountId.slice(0, 8)}...)`);
+    logger.info(`Using price source: ${priceSourceAccount?.account_name || 'ENV fallback'} (${priceSourceAccountId.slice(0, 8)}...)`);
 
     // Initialize MetaAPI with price source account
     const metaApi = new MetaApiManager(priceSourceAccountId);
@@ -139,15 +127,13 @@ async function initialize() {
 
     // Log active execution accounts
     const executionAccounts = await settingsRepo.getActiveExecutionAccounts();
-    initializationState.executionAccounts = executionAccounts.length;
     logger.info(`Found ${executionAccounts.length} active execution accounts:`);
     for (const acc of executionAccounts) {
       logger.info(`  - ${acc.account_name} (${acc.broker}) - Min balance: $${acc.minimum_balance}`);
     }
 
-    // Initialize processors with authenticated userId
-    const userId = supabaseManager.getUserId();
-    const signalProcessor = new SignalProcessor(metaApi, settings, userId);
+    // Initialize processors
+    const signalProcessor = new SignalProcessor(metaApi, settings);
     const positionMonitor = new PositionMonitor(metaApi);
 
     // Set up tick handler
@@ -173,16 +159,9 @@ async function initialize() {
     });
 
     // Subscribe to real-time settings updates
-    supabaseManager.subscribeToSettings((newSettings) => {
+    SupabaseManager.getInstance().subscribeToSettings((newSettings) => {
       logger.info('Settings updated from database');
       signalProcessor.updateSettings(newSettings);
-    });
-
-    // Subscribe to trading account changes
-    supabaseManager.subscribeToTradingAccounts(async () => {
-      const updatedAccounts = await settingsRepo.getActiveExecutionAccounts();
-      initializationState.executionAccounts = updatedAccounts.length;
-      logger.info(`Trading accounts updated: ${updatedAccounts.length} active`);
     });
 
     // Start position monitor (checks SL/TP every 10 seconds)
@@ -228,11 +207,7 @@ async function initialize() {
       await alertManager.sendAlert('critical', 'Unhandled Rejection', String(reason));
     });
 
-    logger.info('✅ TAVY Brain v2.1 is running and ready');
-    logger.info(`   User ID: ${userId}`);
-    logger.info(`   Price Source: ${initializationState.priceSource}`);
-    logger.info(`   Execution Accounts: ${initializationState.executionAccounts}`);
-    logger.info(`   Subscribed Pairs: ${initializationState.subscribedPairs}`);
+    logger.info('✅ TAVY Brain is running and ready');
 
   } catch (error) {
     logger.error('Error during initialization:', error);

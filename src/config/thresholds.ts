@@ -10,7 +10,7 @@ export interface TradingThresholds {
 }
 
 export const DEFAULT_THRESHOLDS: TradingThresholds = {
-  minConfidence: 60,
+  minConfidence: 70,        // Increased from 60 - higher quality signals
   minAtrPips: 5,
   momentumThresholdPips: 8,
   dailyLossLimitPct: 10,
@@ -35,22 +35,22 @@ export const PREFILTER_THRESHOLDS = {
   maxSpreadMultiplier: 2.0
 };
 
-// Anti-scalping rules
+// Anti-scalping rules - UPGRADED for 30% monthly target
 export const ANTI_SCALPING = {
   forex: {
-    minTp1Pips: 20,
-    minRiskReward: 1.0
+    minTp1Pips: 40,         // Increased from 20 - no scalping
+    minRiskReward: 2.0      // Increased from 1.0 - 2:1 minimum
   },
   metals: {
-    minTp1Pips: 50,
-    minRiskReward: 1.0
+    minTp1Pips: 80,         // Increased from 50
+    minRiskReward: 2.0
   },
   stocks: {
-    minTp1Percent: 0.5,
-    minRiskReward: 1.0
+    minTp1Percent: 0.8,     // Increased from 0.5
+    minRiskReward: 2.0
   },
   crypto: {
-    minTp1Percent: 1.0,
-    minRiskReward: 1.0
+    minTp1Percent: 1.5,     // Increased from 1.0
+    minRiskReward: 2.0
   }
 };

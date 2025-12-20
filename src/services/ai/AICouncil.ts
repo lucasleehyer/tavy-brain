@@ -6,11 +6,18 @@ import { logger } from '../../utils/logger';
 import { Candle, Indicators, MarketRegime } from '../../types/market';
 import { SignalDecision } from '../../types/signal';
 
+interface MultiTimeframeCandles {
+  '5m': Candle[];
+  '15m': Candle[];
+  '1h': Candle[];
+  '4h': Candle[];
+}
+
 interface AICouncilInput {
   symbol: string;
   assetType: 'forex' | 'stock' | 'crypto';
   currentPrice: number;
-  candles: Candle[];
+  candles: Candle[] | MultiTimeframeCandles;
   indicators: Indicators;
   regime: MarketRegime;
   accountBalance: number;
@@ -35,10 +42,13 @@ export class AICouncil {
     logger.info(`AI Council analyzing ${input.symbol}...`);
 
     try {
+      // Get candles for technical analysis (use 15m or primary timeframe)
+      const technicalCandles = this.getTechnicalCandles(input.candles);
+
       // Run all agents in parallel for speed
       const [research, technical, predictor] = await Promise.all([
         this.researchAgent.analyze(input.symbol, input.assetType),
-        this.technicalAgent.analyze(input.candles, input.indicators, input.regime),
+        this.technicalAgent.analyze(technicalCandles, input.indicators, input.regime),
         this.predictorAgent.predict(input.symbol, input.candles, input.currentPrice)
       ]);
 
@@ -76,5 +86,14 @@ export class AICouncil {
         agentScores: { research: 0, technical: 0, predictor: 0 }
       };
     }
+  }
+
+  private getTechnicalCandles(candles: Candle[] | MultiTimeframeCandles): Candle[] {
+    if (Array.isArray(candles)) {
+      return candles;
+    }
+    // For multi-timeframe, use 15m for technical analysis
+    const mtf = candles as MultiTimeframeCandles;
+    return mtf['15m'] || mtf['1h'] || mtf['5m'] || [];
   }
 }

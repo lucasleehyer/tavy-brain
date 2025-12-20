@@ -1,5 +1,6 @@
 import { MetaApiManager } from '../websocket/MetaApiManager';
 import { TradeRepository } from '../database/TradeRepository';
+import { SettingsRepository } from '../database/SettingsRepository';
 import { AlertManager } from '../notifications/AlertManager';
 import { logger } from '../../utils/logger';
 import { Signal } from '../../types/signal';
@@ -8,40 +9,112 @@ import { calculateLotSize } from '../../utils/helpers';
 import { pipsToPrice, getPipMultiplier } from '../../config/pairs';
 
 interface ExecutionConfig {
-  masterAccountId: string;
   userId: string;
   defaultRiskPercent: number;
 }
 
+interface TradingAccount {
+  id: string;
+  account_name: string;
+  broker: string;
+  metaapi_account_id: string;
+  minimum_balance: number;
+  leverage: number;
+  is_active: boolean;
+}
+
 export class ExecutionRouter {
-  private metaApi: MetaApiManager;
   private tradeRepo: TradeRepository;
+  private settingsRepo: SettingsRepository;
   private alertManager: AlertManager;
   private config: ExecutionConfig;
+  private accountConnections: Map<string, MetaApiManager> = new Map();
 
-  constructor(metaApi: MetaApiManager, config: ExecutionConfig) {
-    this.metaApi = metaApi;
+  constructor(config: ExecutionConfig) {
     this.tradeRepo = new TradeRepository();
+    this.settingsRepo = new SettingsRepository();
     this.alertManager = new AlertManager();
     this.config = config;
   }
 
-  async executeTrade(signal: Signal, accountBalance: number): Promise<ExecutionResult> {
-    logger.info(`Executing trade: ${signal.symbol} ${signal.action}`);
+  updateRiskPercent(riskPercent: number): void {
+    this.config.defaultRiskPercent = riskPercent;
+    logger.info(`ExecutionRouter risk percent updated to ${riskPercent}%`);
+  }
+
+  async executeTrade(signal: Signal): Promise<ExecutionResult[]> {
+    logger.info(`Executing trade on all active accounts: ${signal.symbol} ${signal.action}`);
+
+    // Get all active execution accounts from database
+    const accounts = await this.settingsRepo.getActiveExecutionAccounts();
+    
+    if (accounts.length === 0) {
+      logger.warn('No active execution accounts found');
+      return [{ success: false, error: 'No active execution accounts' }];
+    }
+
+    logger.info(`Found ${accounts.length} active execution accounts`);
+
+    const results: ExecutionResult[] = [];
+
+    // Execute on each account
+    for (const account of accounts) {
+      const result = await this.executeOnAccount(signal, account);
+      results.push(result);
+    }
+
+    // Send summary alert
+    const successCount = results.filter(r => r.success).length;
+    await this.alertManager.alertSignalFired(
+      signal.symbol,
+      signal.action,
+      signal.confidence,
+      `Executed on ${successCount}/${accounts.length} accounts`
+    );
+
+    return results;
+  }
+
+  private async executeOnAccount(signal: Signal, account: TradingAccount): Promise<ExecutionResult> {
+    logger.info(`Executing on ${account.account_name} (${account.broker})...`);
 
     try {
-      // Calculate lot size
+      // Get or create MetaAPI connection for this account
+      let metaApi = this.accountConnections.get(account.metaapi_account_id);
+      
+      if (!metaApi || !metaApi.isReady()) {
+        metaApi = new MetaApiManager(account.metaapi_account_id);
+        await metaApi.connect();
+        this.accountConnections.set(account.metaapi_account_id, metaApi);
+      }
+
+      // Get account balance
+      const accountInfo = await metaApi.getAccountInfo();
+      const balance = accountInfo.balance;
+
+      // Check minimum balance
+      if (balance < account.minimum_balance) {
+        logger.warn(`Skipping ${account.account_name}: balance $${balance} below minimum $${account.minimum_balance}`);
+        return {
+          success: false,
+          error: `Balance $${balance} below minimum $${account.minimum_balance}`,
+          accountId: account.id,
+          accountName: account.account_name
+        };
+      }
+
+      // Calculate lot size for this account
       const stopLossPips = Math.abs(signal.entryPrice - signal.stopLoss) * getPipMultiplier(signal.symbol);
       const lotSize = calculateLotSize(
-        accountBalance,
+        balance,
         this.config.defaultRiskPercent,
         stopLossPips
       );
 
-      logger.info(`Calculated lot size: ${lotSize} (SL: ${stopLossPips.toFixed(1)} pips)`);
+      logger.info(`${account.account_name}: Balance $${balance}, Lot size: ${lotSize}`);
 
-      // Execute on MetaAPI
-      const result = await this.metaApi.openTrade({
+      // Execute trade
+      const result = await metaApi.openTrade({
         symbol: signal.symbol,
         direction: signal.action.toLowerCase() as 'buy' | 'sell',
         volume: lotSize,
@@ -51,7 +124,7 @@ export class ExecutionRouter {
       });
 
       // Save trade to database
-      const tradeId = await this.tradeRepo.saveTrade({
+      await this.tradeRepo.saveTrade({
         userId: this.config.userId,
         symbol: signal.symbol,
         direction: signal.action.toLowerCase() as 'buy' | 'sell',
@@ -59,7 +132,7 @@ export class ExecutionRouter {
         quantity: lotSize,
         stopLoss: signal.stopLoss,
         takeProfit: signal.takeProfit1,
-        tradingAccountId: this.config.masterAccountId,
+        tradingAccountId: account.id,
         signalId: signal.id,
         mtPositionId: result.positionId,
         executionStatus: 'executed',
@@ -69,31 +142,30 @@ export class ExecutionRouter {
         openedAt: new Date()
       });
 
-      logger.info(`Trade executed successfully: ${result.positionId}`);
-
-      // Send alert
-      await this.alertManager.alertSignalFired(
-        signal.symbol,
-        signal.action,
-        signal.confidence
-      );
+      logger.info(`✅ ${account.account_name}: Trade executed - ${result.positionId}`);
 
       return {
         success: true,
         positionId: result.positionId,
         entryPrice: result.price,
-        accountId: this.config.masterAccountId
+        accountId: account.id,
+        accountName: account.account_name
       };
 
     } catch (error) {
       const errorMessage = (error as Error).message;
-      logger.error('Trade execution failed:', errorMessage);
+      logger.error(`❌ ${account.account_name}: Execution failed - ${errorMessage}`);
 
-      await this.alertManager.alertTradeFailure(signal.symbol, errorMessage);
+      await this.alertManager.alertTradeFailure(
+        signal.symbol,
+        `${account.account_name}: ${errorMessage}`
+      );
 
       return {
         success: false,
-        error: errorMessage
+        error: errorMessage,
+        accountId: account.id,
+        accountName: account.account_name
       };
     }
   }

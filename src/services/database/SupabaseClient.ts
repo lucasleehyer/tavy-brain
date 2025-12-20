@@ -6,7 +6,6 @@ export class SupabaseManager {
   private client: SupabaseClient;
   private static instance: SupabaseManager;
   private isAuthenticated = false;
-  private userId: string | null = null;
 
   private constructor() {
     // Use anon key instead of service role key
@@ -41,8 +40,7 @@ export class SupabaseManager {
       }
 
       this.isAuthenticated = true;
-      this.userId = data.user?.id || null;
-      logger.info(`Authenticated to Supabase as ${data.user?.email} (ID: ${this.userId})`);
+      logger.info(`Authenticated to Supabase as ${data.user?.email}`);
     } catch (error) {
       logger.error('Failed to authenticate to Supabase:', error);
       throw error;
@@ -55,14 +53,6 @@ export class SupabaseManager {
 
   isReady(): boolean {
     return this.isAuthenticated;
-  }
-
-  // Get the authenticated user's ID for database operations
-  getUserId(): string {
-    if (!this.userId) {
-      throw new Error('Not authenticated - userId not available');
-    }
-    return this.userId;
   }
 
   // Real-time settings subscription

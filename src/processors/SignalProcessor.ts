@@ -1,197 +1,280 @@
 import { MetaApiManager } from '../services/websocket/MetaApiManager';
+import { PreFilter } from '../services/analysis/PreFilter';
+import { RegimeDetector } from '../services/analysis/RegimeDetector';
 import { AICouncil } from '../services/ai/AICouncil';
 import { ExecutionRouter } from '../services/execution/ExecutionRouter';
 import { SignalRepository } from '../services/database/SignalRepository';
-import { PreFilter } from '../services/analysis/PreFilter';
-import { IndicatorCalculator } from '../services/analysis/IndicatorCalculator';
-import { RegimeDetector } from '../services/analysis/RegimeDetector';
-import { AlertManager } from '../services/notifications/AlertManager';
+import { SettingsRepository } from '../services/database/SettingsRepository';
 import { activityLogger } from '../services/database/ActivityLogger';
 import { logger } from '../utils/logger';
-import { Tick, TradingThresholds } from '../types';
+import { Tick, Candle } from '../types/market';
+import { TradingThresholds } from '../config/thresholds';
+import { isForexMarketOpen, getCurrentSession } from '../utils/helpers';
 
-// Track processing stats for debugging
-interface ProcessingStats {
-  ticksReceived: number;
-  ticksThrottled: number;
-  candlesFailed: number;
-  preFilterPassed: number;
-  preFilterFailed: number;
-  aiCouncilCalls: number;
-  signalsGenerated: number;
-  signalsSaved: number;
-  tradesExecuted: number;
-  errors: number;
-  lastSymbolProcessed: string;
-  lastProcessTime: number;
+interface ProcessingState {
+  lastProcessed: Map<string, number>;
+  pendingAnalysis: Set<string>;
+  pendingCount: number;
+  dailyApiCalls: number;
+  lastApiCallReset: Date;
+}
+
+interface MultiTimeframeCandles {
+  '5m': Candle[];
+  '15m': Candle[];
+  '1h': Candle[];
+  '4h': Candle[];
 }
 
 export class SignalProcessor {
   private metaApi: MetaApiManager;
+  private preFilter: PreFilter;
+  private regimeDetector: RegimeDetector;
   private aiCouncil: AICouncil;
   private executionRouter: ExecutionRouter;
   private signalRepo: SignalRepository;
-  private preFilter: PreFilter;
-  private indicatorCalc: IndicatorCalculator;
-  private regimeDetector: RegimeDetector;
-  private alertManager: AlertManager;
+  private settingsRepo: SettingsRepository;
   private settings: TradingThresholds;
-  private userId: string;
-  
-  private lastAnalysis: Map<string, number> = new Map();
-  private analysisInterval = 60000; // 1 minute between analyses per symbol
-  private pendingSignals: number = 0;
+  private state: ProcessingState;
   private isRunning: boolean = true;
-  private stats: ProcessingStats;
-  private statsLogInterval: NodeJS.Timeout | null = null;
 
-  constructor(metaApi: MetaApiManager, settings: TradingThresholds, userId: string) {
+  // Process interval: 15 minutes (matches candle timeframe, reduces API calls)
+  private readonly PROCESS_INTERVAL = 900000; // 15 minutes
+  private readonly MAX_DAILY_API_CALLS = 200;
+
+  constructor(metaApi: MetaApiManager, settings: TradingThresholds) {
     this.metaApi = metaApi;
     this.settings = settings;
-    this.userId = userId;
-    
-    this.aiCouncil = new AICouncil();
-    this.executionRouter = new ExecutionRouter();
-    this.signalRepo = new SignalRepository(userId);
-    this.preFilter = new PreFilter(settings);
-    this.indicatorCalc = new IndicatorCalculator();
+    this.preFilter = new PreFilter({
+      minAtrPips: settings.minAtrPips,
+      momentumThresholdPips: settings.momentumThresholdPips
+    });
     this.regimeDetector = new RegimeDetector();
-    this.alertManager = new AlertManager();
-    
-    // Initialize stats
-    this.stats = {
-      ticksReceived: 0,
-      ticksThrottled: 0,
-      candlesFailed: 0,
-      preFilterPassed: 0,
-      preFilterFailed: 0,
-      aiCouncilCalls: 0,
-      signalsGenerated: 0,
-      signalsSaved: 0,
-      tradesExecuted: 0,
-      errors: 0,
-      lastSymbolProcessed: 'none',
-      lastProcessTime: Date.now()
-    };
-    
-    // Log stats every 30 seconds for visibility
-    this.statsLogInterval = setInterval(() => {
-      this.logStats();
-    }, 30000);
-    
-    logger.info(\`✅ SignalProcessor initialized with userId: \${userId}\`);
-    logger.info(\`   Analysis interval: \${this.analysisInterval}ms\`);
-    logger.info(\`   Min confidence: \${this.settings.minConfidence || 60}%\`);
-  }
+    this.aiCouncil = new AICouncil();
+    this.signalRepo = new SignalRepository();
+    this.settingsRepo = new SettingsRepository();
 
-  private async logStats(): Promise<void> {
-    logger.info(\`📊 STATS | Ticks: \${this.stats.ticksReceived} | Throttled: \${this.stats.ticksThrottled} | PreFilter Pass/Fail: \${this.stats.preFilterPassed}/\${this.stats.preFilterFailed} | AI Calls: \${this.stats.aiCouncilCalls} | Signals: \${this.stats.signalsGenerated} | Saved: \${this.stats.signalsSaved} | Trades: \${this.stats.tradesExecuted} | Errors: \${this.stats.errors} | Last: \${this.stats.lastSymbolProcessed}\`);
-    
-    // Log scanning activity to dashboard
-    await activityLogger.logScanning(
-      this.stats.ticksReceived, 
-      this.stats.preFilterPassed, 
-      this.stats.signalsGenerated
-    );
+    // Initialize execution router with default risk (will be overridden from DB)
+    this.executionRouter = new ExecutionRouter(metaApi, {
+      masterAccountId: process.env.METAAPI_ACCOUNT_ID!,
+      userId: 'system',
+      defaultRiskPercent: 10 // Default, will be read from DB
+    });
+
+    this.state = {
+      lastProcessed: new Map(),
+      pendingAnalysis: new Set(),
+      pendingCount: 0,
+      dailyApiCalls: 0,
+      lastApiCallReset: new Date()
+    };
   }
 
   async processTick(tick: Tick): Promise<void> {
     if (!this.isRunning) return;
-    
-    this.stats.ticksReceived++;
-    this.stats.lastSymbolProcessed = tick.symbol;
-    this.stats.lastProcessTime = Date.now();
 
-    const symbol = tick.symbol;
-    const now = Date.now();
-    const lastTime = this.lastAnalysis.get(symbol) || 0;
-
-    // Only analyze each symbol every analysisInterval
-    if (now - lastTime < this.analysisInterval) {
-      this.stats.ticksThrottled++;
+    // Check if forex market is open
+    if (!isForexMarketOpen()) {
       return;
     }
 
-    this.lastAnalysis.set(symbol, now);
-    logger.info(\`🔍 Processing \${symbol} @ \${tick.bid}/\${tick.ask} (spread: \${((tick.ask - tick.bid) * 10000).toFixed(1)} pips)\`);
+    // Reset daily API call counter at midnight UTC
+    this.checkAndResetDailyCounter();
 
+    // Check daily API call limit
+    if (this.state.dailyApiCalls >= this.MAX_DAILY_API_CALLS) {
+      logger.warn(`Daily API call limit reached (${this.MAX_DAILY_API_CALLS}), skipping analysis`);
+      return;
+    }
+
+    // Check if AI is enabled (kill switch)
+    const aiEnabled = await this.settingsRepo.isAIEnabled();
+    if (!aiEnabled) {
+      return;
+    }
+
+    // Check if we recently processed this symbol (15 min interval)
+    const lastProcessed = this.state.lastProcessed.get(tick.symbol) || 0;
+    if (Date.now() - lastProcessed < this.PROCESS_INTERVAL) {
+      return;
+    }
+
+    // Check if already being analyzed
+    if (this.state.pendingAnalysis.has(tick.symbol)) {
+      return;
+    }
+
+    // Mark as being processed
+    this.state.lastProcessed.set(tick.symbol, Date.now());
+    this.state.pendingAnalysis.add(tick.symbol);
+
+    try {
+      await this.analyzeSymbol(tick.symbol, tick);
+    } finally {
+      this.state.pendingAnalysis.delete(tick.symbol);
+    }
+  }
+
+  private checkAndResetDailyCounter(): void {
+    const now = new Date();
+    const lastReset = this.state.lastApiCallReset;
+    
+    // Check if it's a new day (UTC)
+    if (now.getUTCDate() !== lastReset.getUTCDate() || 
+        now.getUTCMonth() !== lastReset.getUTCMonth() ||
+        now.getUTCFullYear() !== lastReset.getUTCFullYear()) {
+      this.state.dailyApiCalls = 0;
+      this.state.lastApiCallReset = now;
+      logger.info('Daily API call counter reset');
+    }
+  }
+
+  private async analyzeSymbol(symbol: string, tick: Tick): Promise<void> {
     try {
       // Log that we're analyzing
       await activityLogger.logAnalyzing(symbol);
 
-      // Get candles for analysis
-      const candles = this.metaApi.getCandles(symbol, 'M15', 100);
-      if (candles.length < 50) {
-        this.stats.candlesFailed++;
-        logger.warn(\`⚠️ \${symbol}: Insufficient candles (\${candles.length}/50 required)\`);
-        return;
+      // Get multi-timeframe candles
+      const mtfCandles = await this.getMultiTimeframeCandles(symbol);
+      
+      // Use 15m candles for pre-filter
+      const candles15m = mtfCandles['15m'];
+      if (candles15m.length < 50) {
+        return; // Not enough data
       }
-      
-      logger.debug(\`📊 \${symbol}: Got \${candles.length} candles, latest close: \${candles[candles.length - 1]?.close}\`);
 
-      // Calculate indicators
-      const indicators = this.indicatorCalc.calculate(candles);
-      logger.debug(\`📈 \${symbol}: RSI=\${indicators.rsi?.toFixed(1)}, ATR=\${indicators.atr?.toFixed(5)}\`);
-      
-      // Detect market regime
-      const regime = this.regimeDetector.detect(candles, indicators);
-      logger.debug(\`🎯 \${symbol}: Regime=\${regime.type}, Trend=\${regime.trend}\`);
+      // Run pre-filter on 15m candles
+      const preFilterResult = this.preFilter.analyze(symbol, candles15m);
 
-      // Pre-filter check
-      const preFilterResult = this.preFilter.check(symbol, candles, indicators, regime);
       if (!preFilterResult.passed) {
-        this.stats.preFilterFailed++;
-        logger.info(\`❌ \${symbol}: Pre-filter FAILED - \${preFilterResult.reason}\`);
+        await this.signalRepo.logDecision({
+          userId: 'system',
+          symbol,
+          assetType: 'forex',
+          decision: 'REJECTED',
+          decisionType: 'pre_filter',
+          confidence: 0,
+          narrative: preFilterResult.reason || 'Pre-filter rejected',
+          rejectionReason: preFilterResult.reason
+        });
         return;
       }
 
-      this.stats.preFilterPassed++;
-      logger.info(\`✅ \${symbol}: Pre-filter PASSED, running AI Council...\`);
+      // Check for duplicate pending signal
+      const hasDuplicate = await this.signalRepo.checkDuplicateSignal(symbol);
+      if (hasDuplicate) {
+        logger.info(`${symbol}: Skipping - pending signal already exists`);
+        return;
+      }
 
-      // Get account info for position sizing
+      // Detect market regime
+      const regime = this.regimeDetector.detect(preFilterResult.indicators!);
+
+      // Get account info
       const accountInfo = await this.metaApi.getAccountInfo();
-      logger.debug(\`💰 Account: Balance=$\${accountInfo.balance}, Equity=$\${accountInfo.equity}\`);
 
-      // Run AI Council analysis
-      this.stats.aiCouncilCalls++;
-      logger.info(\`🤖 \${symbol}: Calling AI Council with price \${tick.bid}...\`);
-      
+      // Get risk percent from database
+      const riskPercent = await this.settingsRepo.getRiskPercent();
+
+      // Increment API call counter (we're about to call AI)
+      this.state.dailyApiCalls++;
+      logger.info(`Daily API calls: ${this.state.dailyApiCalls}/${this.MAX_DAILY_API_CALLS}`);
+
+      // Run AI Council with multi-timeframe data
       const decision = await this.aiCouncil.analyze({
         symbol,
         assetType: 'forex',
-        currentPrice: tick.bid,
-        candles,
-        indicators,
+        currentPrice: (tick.bid + tick.ask) / 2,
+        candles: mtfCandles,
+        indicators: preFilterResult.indicators!,
         regime,
         accountBalance: accountInfo.balance,
-        riskPercent: this.settings.riskPercent || 5
+        riskPercent
       });
 
-      logger.info(\`🤖 \${symbol}: AI Council returned: \${decision.action} @ \${decision.confidence}% confidence\`);
-      logger.debug(\`   Entry: \${decision.entryPrice}, SL: \${decision.stopLoss}, TP1: \${decision.takeProfit1}\`);
+      // Log the decision
+      await this.signalRepo.logDecision({
+        userId: 'system',
+        symbol,
+        assetType: 'forex',
+        decision: decision.action,
+        decisionType: 'ai_council',
+        confidence: decision.confidence,
+        narrative: decision.reasoning,
+        engineConsensus: decision.agentScores,
+        rejectionReason: decision.action === 'HOLD' ? decision.reasoning : undefined
+      });
 
       // Log decision to activity feed
       await activityLogger.logDecision(symbol, decision.action, decision.confidence);
 
-      // Check confidence threshold
-      const minConfidence = this.settings.minConfidence || 60;
-      if (decision.action === 'HOLD' || decision.confidence < minConfidence) {
-        logger.info(\`⏸️ \${symbol}: Signal REJECTED - \${decision.action} at \${decision.confidence}% (min: \${minConfidence}%)\`);
-        logger.info(\`   Reason: \${decision.reasoning?.slice(0, 100)}...\`);
-        return;
+      // Execute if not HOLD and meets confidence threshold (now 70%)
+      if (decision.action !== 'HOLD' && decision.confidence >= this.settings.minConfidence) {
+        await activityLogger.logSignal(symbol, decision.action, decision.confidence);
+        await this.executeSignal(symbol, decision, accountInfo.balance, riskPercent);
       }
 
-      this.stats.signalsGenerated++;
-      logger.info(\`🎉 \${symbol}: Signal APPROVED - \${decision.action} @ \${decision.confidence}%\`);
+    } catch (error) {
+      logger.error(`Error analyzing ${symbol}:`, error);
+      await activityLogger.logError(`Error analyzing ${symbol}`, { error: (error as Error).message });
+    }
+  }
 
-      // Log signal to activity feed
-      await activityLogger.logSignal(symbol, decision.action, decision.confidence);
+  private async getMultiTimeframeCandles(symbol: string): Promise<MultiTimeframeCandles> {
+    // Fetch candles for all timeframes
+    const [candles5m, candles15m, candles1h, candles4h] = await Promise.all([
+      Promise.resolve(this.metaApi.getCandles(symbol, '5m', 50)),
+      Promise.resolve(this.metaApi.getCandles(symbol, '15m', 100)),
+      Promise.resolve(this.metaApi.getCandles(symbol, '1h', 50)),
+      Promise.resolve(this.metaApi.getCandles(symbol, '4h', 30))
+    ]);
 
-      // Save signal to database with proper userId
-      logger.info(\`💾 \${symbol}: Saving signal to database with userId: \${this.userId}...\`);
-      
-      const signal = await this.signalRepo.saveSignal({
-        userId: this.userId,
+    return {
+      '5m': candles5m,
+      '15m': candles15m,
+      '1h': candles1h,
+      '4h': candles4h
+    };
+  }
+
+  private async executeSignal(
+    symbol: string,
+    decision: any,
+    accountBalance: number,
+    riskPercent: number
+  ): Promise<void> {
+    // Save signal first
+    const signalId = await this.signalRepo.saveSignal({
+      userId: 'system',
+      symbol,
+      assetType: 'forex',
+      action: decision.action,
+      confidence: decision.confidence,
+      entryPrice: decision.entryPrice,
+      stopLoss: decision.stopLoss,
+      takeProfit1: decision.takeProfit1,
+      takeProfit2: decision.takeProfit2,
+      takeProfit3: decision.takeProfit3,
+      reasoning: decision.reasoning,
+      source: 'forex_monitor',
+      marketRegime: decision.regime?.type,
+      agentOutputs: decision.agentOutputs,
+      snapshotSettings: { ...this.settings, riskPercent }
+    });
+
+    if (!signalId) {
+      logger.error('Failed to save signal, aborting execution');
+      return;
+    }
+
+    // Update execution router with current risk percent
+    this.executionRouter.updateRiskPercent(riskPercent);
+
+    // Execute trade
+    const result = await this.executionRouter.executeTrade(
+      {
+        id: signalId,
+        userId: 'system',
         symbol,
         assetType: 'forex',
         action: decision.action,
@@ -199,75 +282,40 @@ export class SignalProcessor {
         entryPrice: decision.entryPrice,
         stopLoss: decision.stopLoss,
         takeProfit1: decision.takeProfit1,
-        takeProfit2: decision.takeProfit2,
-        takeProfit3: decision.takeProfit3,
         reasoning: decision.reasoning,
         source: 'forex_monitor',
-        marketRegime: regime.type,
-        agentOutputs: decision.agentOutputs,
-        agentScores: decision.agentScores
-      });
+        snapshotSettings: { ...this.settings, riskPercent }
+      },
+      accountBalance
+    );
 
-      if (signal) {
-        this.stats.signalsSaved++;
-        logger.info(\`✅ \${symbol}: Signal SAVED to database with ID: \${signal.id}\`);
-      } else {
-        logger.error(\`❌ \${symbol}: Failed to save signal to database!\`);
-      }
-
-      this.pendingSignals++;
-
-      // Execute trades on all active accounts
-      logger.info(\`🚀 \${symbol}: Executing trades on active accounts...\`);
-      const execResults = await this.executionRouter.executeSignal(signal, decision, this.userId);
-      
-      if (execResults && execResults.length > 0) {
-        this.stats.tradesExecuted += execResults.length;
-        logger.info(\`✅ \${symbol}: Executed \${execResults.length} trades\`);
-        for (const result of execResults) {
-          logger.info(\`   Account: \${result.accountName}, Position: \${result.positionId}, Price: \${result.price}\`);
-          // Log trade to activity feed
-          await activityLogger.logTrade(symbol, result.accountName, decision.action);
-        }
-      } else {
-        logger.warn(\`⚠️ \${symbol}: No trades executed (check account balances/status)\`);
-      }
-
-      // Send alert notification
-      await this.alertManager.alertSignalFired(
-        symbol,
-        decision.action,
-        decision.confidence,
-        \`Entry: \${decision.entryPrice}, SL: \${decision.stopLoss}, TP1: \${decision.takeProfit1}\`
-      );
-
-    } catch (error) {
-      this.stats.errors++;
-      logger.error(\`💥 ERROR processing \${symbol}:\`, error);
-      await activityLogger.logError(\`Error analyzing \${symbol}\`, { error: (error as Error).message });
+    if (result.success) {
+      await activityLogger.logTrade(symbol, 'Primary Account', decision.action);
+    } else {
+      logger.error(`Trade execution failed for ${symbol}: ${result.error}`);
+      await activityLogger.logError(`Trade execution failed for ${symbol}`, { error: result.error });
     }
   }
 
   updateSettings(newSettings: Partial<TradingThresholds>): void {
     this.settings = { ...this.settings, ...newSettings };
-    this.preFilter.updateThresholds(this.settings);
-    logger.info(\`⚙️ SignalProcessor settings updated: minConfidence=\${this.settings.minConfidence}\`);
+    this.preFilter.updateThresholds({
+      minAtrPips: this.settings.minAtrPips,
+      momentumThresholdPips: this.settings.momentumThresholdPips
+    });
+    logger.info('Signal processor settings updated');
   }
 
   getPendingCount(): number {
-    return this.pendingSignals;
+    return this.state.pendingAnalysis.size;
   }
 
-  getStats(): ProcessingStats {
-    return { ...this.stats };
+  getDailyApiCalls(): number {
+    return this.state.dailyApiCalls;
   }
 
   stop(): void {
     this.isRunning = false;
-    if (this.statsLogInterval) {
-      clearInterval(this.statsLogInterval);
-    }
-    this.logStats(); // Final stats log
-    logger.info('🛑 SignalProcessor stopped');
+    logger.info('Signal processor stopped');
   }
 }
