@@ -8,7 +8,7 @@ import { SettingsRepository } from './services/database/SettingsRepository';
 import { AlertManager } from './services/notifications/AlertManager';
 import { ThresholdOptimizer } from './services/ai/ThresholdOptimizer';
 import { logger } from './utils/logger';
-import { FOREX_PAIRS } from './config/pairs';
+import { ALL_PAIRS } from './config/pairs';
 
 // Track initialization state
 let initializationState = {
@@ -121,7 +121,7 @@ async function initialize() {
     initializationState.metaApi = true;
 
     // Subscribe to forex pairs
-    const pairs = process.env.FOREX_PAIRS?.split(',') || FOREX_PAIRS;
+    const pairs = process.env.TRADING_PAIRS?.split(',') || ALL_PAIRS;
     logger.info(`Subscribing to ${pairs.length} pairs...`);
     await metaApi.subscribeToSymbols(pairs);
     initializationState.subscribedPairs = pairs.length;
