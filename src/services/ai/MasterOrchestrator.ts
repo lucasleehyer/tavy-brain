@@ -3,6 +3,8 @@ import { config } from '../../config';
 import { ResearchOutput, TechnicalOutput, PredictorOutput, SignalDecision, AgentScores } from '../../types/signal';
 import { MarketRegime } from '../../types/market';
 import { DeepSeekClient } from './DeepSeekClient';
+import { isCryptoPair } from '../../config/pairs';
+import { CRYPTO_THRESHOLDS, ANTI_SCALPING } from '../../config/thresholds';
 
 interface OrchestratorInput {
   symbol: string;
@@ -16,7 +18,26 @@ interface OrchestratorInput {
     technical: TechnicalOutput;
     predictor: PredictorOutput;
   };
+  // Aggressive mode parameters
+  aggressiveMode?: boolean;
+  momentumBonus?: number;
 }
+
+// Aggressive mode thresholds for paper trading
+const AGGRESSIVE_CONFIG = {
+  crypto: {
+    minRR: 1.3,           // Lower R:R for crypto (was 2.0)
+    minConfidence: 55,    // Lower confidence (was 70)
+    minChecks: 3,         // Fewer checks required (was 4)
+    allowCounterTrend: true
+  },
+  forex: {
+    minRR: 1.5,           // Slightly lower R:R for forex (was 2.0)
+    minConfidence: 60,    // Slightly lower confidence
+    minChecks: 4,
+    allowCounterTrend: false
+  }
+};
 
 export class MasterOrchestrator {
   private client: DeepSeekClient | null = null;
@@ -44,11 +65,14 @@ export class MasterOrchestrator {
   }
 
   private async orchestrateWithDeepSeek(input: OrchestratorInput, client: DeepSeekClient): Promise<SignalDecision> {
+    const isCrypto = isCryptoPair(input.symbol);
+    const aggressiveMode = input.aggressiveMode ?? true; // Default to aggressive for paper trading
+    
     // Use deepseek-reasoner for critical trading decisions (thinking mode)
     const response = await client.chat(
       [
-        { role: 'system', content: this.getSystemPrompt(input.assetType) },
-        { role: 'user', content: this.getUserPrompt(input) }
+        { role: 'system', content: this.getSystemPrompt(input.assetType, aggressiveMode) },
+        { role: 'user', content: this.getUserPrompt(input, aggressiveMode) }
       ],
       { model: 'deepseek-reasoner', temperature: 0.2, maxTokens: 4096 }
     );
@@ -58,66 +82,83 @@ export class MasterOrchestrator {
       logger.debug('DeepSeek Reasoner thinking:', response.reasoningContent.slice(0, 500));
     }
 
-    return this.parseResponse(response.content, input.currentPrice);
+    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus);
   }
 
-  private getSystemPrompt(assetType: string): string {
+  private getSystemPrompt(assetType: string, aggressiveMode: boolean): string {
+    const aggressiveConfig = assetType === 'crypto' ? AGGRESSIVE_CONFIG.crypto : AGGRESSIVE_CONFIG.forex;
+    
     let antiScalpingRule: string;
+    let minRR: string;
+    
     if (assetType === 'forex') {
-      antiScalpingRule = '40 pips minimum for forex, 80 pips for metals (XAU/XAG)';
+      antiScalpingRule = `${ANTI_SCALPING.forex.minTp1Pips} pips minimum for forex, ${ANTI_SCALPING.metals.minTp1Pips} pips for metals (XAU/XAG)`;
+      minRR = aggressiveMode ? '1:1.5' : '1:2';
     } else if (assetType === 'stock') {
-      antiScalpingRule = '0.8% minimum move for stocks';
+      antiScalpingRule = `${ANTI_SCALPING.stocks.minTp1Percent}% minimum move for stocks`;
+      minRR = aggressiveMode ? '1:1.5' : '1:2';
     } else {
-      antiScalpingRule = '1.5% minimum move for crypto';
+      // CRYPTO - AGGRESSIVE MODE
+      antiScalpingRule = `${ANTI_SCALPING.crypto.minTp1Percent}% minimum move for crypto`;
+      minRR = aggressiveMode ? '1:1.3' : '1:1.5';
     }
 
-    return `You are the MASTER TRADING ORCHESTRATOR for TAVY - an ELITE INSTITUTIONAL FOREX TRADER with 20+ years of experience managing $100M+ portfolios.
+    const modeLabel = aggressiveMode ? '🔥 AGGRESSIVE PAPER TRADING MODE' : 'STANDARD MODE';
+
+    return `You are the MASTER TRADING ORCHESTRATOR for TAVY - an ELITE INSTITUTIONAL TRADER.
+${modeLabel}
 
 Your job is to synthesize inputs from Research, Technical, and Prediction agents to make FINAL trading decisions.
 
 ═══════════════════════════════════════════════════════════════
-                         IRON RULES (NEVER BREAK)
+                         ${aggressiveMode ? 'AGGRESSIVE' : 'IRON'} RULES ${aggressiveMode ? '(PAPER TRADING)' : ''}
 ═══════════════════════════════════════════════════════════════
 
-1. MINIMUM RISK:REWARD = 1:2
-   - REJECT if TP1 < 2x SL distance
-   - Calculate: If SL is 30 pips, TP1 must be at least 60 pips
+1. MINIMUM RISK:REWARD = ${minRR}
+   ${aggressiveMode ? '- AGGRESSIVE MODE: Lower threshold for more trades' : '- REJECT if TP1 < 2x SL distance'}
+   - Calculate: If SL is 30 pips, TP1 must be at least ${aggressiveMode ? '45' : '60'} pips
 
 2. ANTI-SCALPING: TP1 must be at least ${antiScalpingRule}
-   - No small moves, we hunt for significant opportunities
+   - ${aggressiveMode ? 'Hunt for momentum trades, but not micro-scalps' : 'No small moves, we hunt for significant opportunities'}
 
-3. CONFIDENCE THRESHOLD: Only BUY/SELL if confidence >= 70%
+3. CONFIDENCE THRESHOLD: Only BUY/SELL if confidence >= ${aggressiveConfig.minConfidence}%
+   ${aggressiveMode ? `
+   - ${aggressiveConfig.minConfidence}-65%: Proceed with smaller size
+   - 65-75%: Standard position
+   - 75-85%: Larger position
+   - 85%+: Full aggressive position` : `
    - 70-79%: Proceed with caution
    - 80-89%: Strong setup
-   - 90%+: Exceptional opportunity
+   - 90%+: Exceptional opportunity`}
 
-4. AGENT CONSENSUS: All 3 agents must lean same direction
-   - Research, Technical, Predictor must agree (no split decisions)
-   - If disagreement: HOLD
+4. AGENT CONSENSUS: ${aggressiveMode ? '2 of 3 agents must lean same direction' : 'All 3 agents must lean same direction'}
+   ${aggressiveMode ? '- Allow split decisions if 2/3 agree with high confidence' : '- Research, Technical, Predictor must agree (no split decisions)'}
+   - If complete disagreement: HOLD
 
-5. REGIME ALIGNMENT: Trade direction must match market regime
+5. REGIME ALIGNMENT: ${aggressiveMode ? 'Preferred but not required' : 'Trade direction must match market regime'}
+   ${aggressiveMode ? `
+   - Strong trend: Follow the trend
+   - Ranging: Trade breakouts from range
+   - Can counter-trend if momentum is strong` : `
    - Trending bullish = only BUY
    - Trending bearish = only SELL
-   - Ranging = trade to key levels only
-   - Volatile = reduce position size or HOLD
+   - Ranging = trade to key levels only`}
 
-6. NEWS FILTER: NO trading within 60 minutes of high-impact news
-   - Check research agent for upcoming events
+6. NEWS FILTER: ${aggressiveMode ? 'Reduce position during high-impact news, but can trade' : 'NO trading within 60 minutes of high-impact news'}
 
-7. SESSION FILTER: For EUR/GBP pairs, avoid Asian session
-   - Low liquidity = poor execution
+7. SESSION FILTER: ${assetType === 'crypto' ? 'CRYPTO TRADES 24/7 - no session restrictions' : 'For EUR/GBP pairs, avoid Asian session'}
 
 ═══════════════════════════════════════════════════════════════
-                         ENTRY CHECKLIST (4/5 REQUIRED)
+                         ENTRY CHECKLIST (${aggressiveConfig.minChecks}/5 REQUIRED)
 ═══════════════════════════════════════════════════════════════
 
 □ Trend alignment across timeframes (4H/1H same direction)
 □ RSI not extreme (between 30-70) OR confirming reversal at extremes
-□ Key support/resistance level nearby (within 20 pips for forex)
+□ Key support/resistance level nearby
 □ Momentum confirming direction (positive for BUY, negative for SELL)
 □ No negative sentiment news from research agent
 
-If fewer than 4 boxes checked: HOLD
+If fewer than ${aggressiveConfig.minChecks} boxes checked: HOLD
 
 ═══════════════════════════════════════════════════════════════
                          POSITION MANAGEMENT
@@ -125,20 +166,8 @@ If fewer than 4 boxes checked: HOLD
 
 - Use the provided risk percent per trade (user configurable)
 - TP1: Close 50% at 1:1 R:R, move SL to breakeven
-- TP2: Close 30% at 1:2 R:R  
+- TP2: Close 30% at 1:${aggressiveMode ? '1.5' : '2'} R:R  
 - TP3: Let remaining 20% run with trailing stop
-
-═══════════════════════════════════════════════════════════════
-                         TIMEFRAME SELECTION
-═══════════════════════════════════════════════════════════════
-
-Analyze data from Predictor agent (includes 5m, 15m, 1H, 4H):
-- Use 4H for overall bias and major levels
-- Use 1H for trend confirmation
-- Use 15m for entry timing
-- Use 5m for precision entries only
-
-Recommend the timeframe with BEST risk:reward for entry.
 
 ═══════════════════════════════════════════════════════════════
                          OUTPUT FORMAT (JSON ONLY)
@@ -171,11 +200,19 @@ Recommend the timeframe with BEST risk:reward for entry.
 }`;
   }
 
-  private getUserPrompt(input: OrchestratorInput): string {
+  private getUserPrompt(input: OrchestratorInput, aggressiveMode: boolean): string {
+    const modeNote = aggressiveMode 
+      ? '\n⚡ AGGRESSIVE MODE ACTIVE - Be more willing to take trades with good setups. This is paper trading.\n' 
+      : '';
+    
+    const momentumNote = input.momentumBonus 
+      ? `\n🔥 MOMENTUM BONUS: +${input.momentumBonus}% confidence boost from winning streak\n`
+      : '';
+
     return `═══════════════════════════════════════════════════════════════
                          ANALYZE THIS SETUP
 ═══════════════════════════════════════════════════════════════
-
+${modeNote}${momentumNote}
 SYMBOL: ${input.symbol} (${input.assetType})
 CURRENT PRICE: ${input.currentPrice}
 MARKET REGIME: ${JSON.stringify(input.regime)}
@@ -200,11 +237,17 @@ ACCOUNT CONTEXT:
 
 ═══════════════════════════════════════════════════════════════
 
-Apply the IRON RULES and ENTRY CHECKLIST. Synthesize all inputs.
+Apply the ${aggressiveMode ? 'AGGRESSIVE' : 'IRON'} RULES and ENTRY CHECKLIST. Synthesize all inputs.
 Provide your trading decision as JSON.`;
   }
 
-  private parseResponse(content: string, currentPrice: number): SignalDecision {
+  private parseResponse(
+    content: string, 
+    currentPrice: number, 
+    isCrypto: boolean,
+    aggressiveMode: boolean,
+    momentumBonus?: number
+  ): SignalDecision {
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
@@ -216,20 +259,41 @@ Provide your trading decision as JSON.`;
           predictor: parsed.agent_scores?.predictor || 50
         };
 
-        // Validate R:R ratio
+        // Apply momentum bonus to confidence
+        let adjustedConfidence = parsed.confidence || 0;
+        if (momentumBonus && momentumBonus > 0) {
+          adjustedConfidence = Math.min(100, adjustedConfidence + momentumBonus);
+          logger.info(`[ORCHESTRATOR] Confidence boosted: ${parsed.confidence}% + ${momentumBonus}% = ${adjustedConfidence}%`);
+        }
+
+        // Validate R:R ratio with aggressive thresholds
         if (parsed.action !== 'HOLD') {
           const slDistance = Math.abs(parsed.entry_price - parsed.stop_loss);
           const tp1Distance = Math.abs(parsed.take_profit_1 - parsed.entry_price);
           
-          if (tp1Distance < slDistance * 2) {
-            logger.warn(`R:R ratio too low: ${(tp1Distance/slDistance).toFixed(2)}:1, rejecting signal`);
-            return this.getHoldDecision(currentPrice, 'R:R ratio below 2:1 minimum');
+          // Aggressive mode: 1.3 for crypto, 1.5 for forex
+          const minRR = aggressiveMode ? (isCrypto ? 1.3 : 1.5) : 2.0;
+          
+          if (tp1Distance < slDistance * minRR) {
+            logger.warn(`R:R ratio ${(tp1Distance/slDistance).toFixed(2)}:1 below minimum ${minRR}:1`);
+            
+            // In aggressive mode, try to adjust TP instead of rejecting
+            if (aggressiveMode) {
+              const adjustedTp1 = parsed.action === 'BUY' 
+                ? parsed.entry_price + (slDistance * minRR)
+                : parsed.entry_price - (slDistance * minRR);
+              
+              logger.info(`[AGGRESSIVE] Adjusted TP1: ${parsed.take_profit_1} -> ${adjustedTp1}`);
+              parsed.take_profit_1 = adjustedTp1;
+            } else {
+              return this.getHoldDecision(currentPrice, `R:R ratio below ${minRR}:1 minimum`);
+            }
           }
         }
 
         return {
           action: parsed.action || 'HOLD',
-          confidence: parsed.confidence || 0,
+          confidence: adjustedConfidence,
           entryPrice: parsed.entry_price || currentPrice,
           stopLoss: parsed.stop_loss || 0,
           takeProfit1: parsed.take_profit_1 || 0,

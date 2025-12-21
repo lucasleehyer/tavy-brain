@@ -1,10 +1,23 @@
 import { Candle, Indicators } from '../../types/market';
+import { TwinRangeFilter } from './TwinRangeFilter';
 
 export class IndicatorCalculator {
+  private twinRangeFilter: TwinRangeFilter;
+
+  constructor() {
+    this.twinRangeFilter = new TwinRangeFilter();
+  }
+
   calculate(candles: Candle[]): Indicators {
     const closes = candles.map(c => c.close);
     const highs = candles.map(c => c.high);
     const lows = candles.map(c => c.low);
+
+    // Calculate Twin Range
+    const twinRange = this.twinRangeFilter.calculate(candles);
+
+    // Detect market structure
+    const marketStructure = this.detectMarketStructure(candles);
 
     return {
       rsi: this.calculateRSI(closes, 14),
@@ -21,8 +34,52 @@ export class IndicatorCalculator {
       support1: this.calculatePivotPoints(highs, lows, closes).s1,
       support2: this.calculatePivotPoints(highs, lows, closes).s2,
       resistance1: this.calculatePivotPoints(highs, lows, closes).r1,
-      resistance2: this.calculatePivotPoints(highs, lows, closes).r2
+      resistance2: this.calculatePivotPoints(highs, lows, closes).r2,
+      // Twin Range additions
+      twinRangeFilter: twinRange.filterLine,
+      twinRangeDirection: twinRange.direction,
+      twinRangeStrength: twinRange.strength,
+      // Market structure
+      marketStructure
     };
+  }
+
+  private detectMarketStructure(candles: Candle[]): 'HH_HL' | 'LH_LL' | 'ranging' {
+    if (candles.length < 20) return 'ranging';
+
+    // Find swing highs and lows
+    const swingHighs: number[] = [];
+    const swingLows: number[] = [];
+    const lookback = 3;
+
+    for (let i = lookback; i < candles.length - lookback; i++) {
+      let isHigh = true;
+      let isLow = true;
+
+      for (let j = i - lookback; j <= i + lookback; j++) {
+        if (j === i) continue;
+        if (candles[j].high >= candles[i].high) isHigh = false;
+        if (candles[j].low <= candles[i].low) isLow = false;
+      }
+
+      if (isHigh) swingHighs.push(candles[i].high);
+      if (isLow) swingLows.push(candles[i].low);
+    }
+
+    if (swingHighs.length < 2 || swingLows.length < 2) return 'ranging';
+
+    // Check last two swing highs and lows
+    const lastHighs = swingHighs.slice(-2);
+    const lastLows = swingLows.slice(-2);
+
+    const higherHighs = lastHighs[1] > lastHighs[0];
+    const higherLows = lastLows[1] > lastLows[0];
+    const lowerHighs = lastHighs[1] < lastHighs[0];
+    const lowerLows = lastLows[1] < lastLows[0];
+
+    if (higherHighs && higherLows) return 'HH_HL';
+    if (lowerHighs && lowerLows) return 'LH_LL';
+    return 'ranging';
   }
 
   private calculateRSI(closes: number[], period: number): number {

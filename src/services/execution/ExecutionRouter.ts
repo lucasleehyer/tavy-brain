@@ -2,11 +2,13 @@ import { MetaApiManager } from '../websocket/MetaApiManager';
 import { TradeRepository } from '../database/TradeRepository';
 import { SettingsRepository } from '../database/SettingsRepository';
 import { AlertManager } from '../notifications/AlertManager';
+import { CircuitBreaker } from '../risk/CircuitBreaker';
 import { logger } from '../../utils/logger';
 import { Signal } from '../../types/signal';
 import { ExecutionResult } from '../../types/trade';
-import { calculateLotSize } from '../../utils/helpers';
-import { pipsToPrice, getPipMultiplier } from '../../config/pairs';
+import { calculateLotSize, calculateCryptoLotSize } from '../../utils/helpers';
+import { pipsToPrice, getPipMultiplier, isCryptoPair } from '../../config/pairs';
+import { ANTI_SCALPING } from '../../config/thresholds';
 
 interface ExecutionConfig {
   userId: string;
@@ -23,10 +25,34 @@ interface TradingAccount {
   is_active: boolean;
 }
 
+export interface DynamicPositionConfig {
+  baseRiskPercent: number;
+  confidence: number;
+  confluenceScore: number;
+}
+
+// Confidence tiers for position sizing
+const CONFIDENCE_TIERS = {
+  FULL: { minConfidence: 85, multiplier: 1.5 },     // Full position
+  STANDARD: { minConfidence: 70, multiplier: 1.0 }, // Standard position
+  HALF: { minConfidence: 60, multiplier: 0.5 },     // Half position
+  REJECT: { minConfidence: 0, multiplier: 0 }       // No trade
+};
+
+// Confluence score bonuses
+const CONFLUENCE_BONUSES = {
+  EXCEPTIONAL: { minScore: 90, bonusPercent: 1.0 },
+  HIGH: { minScore: 80, bonusPercent: 0.5 },
+  STANDARD: { minScore: 60, bonusPercent: 0 }
+};
+
+const MAX_TOTAL_RISK_PERCENT = 3; // Never exceed 3% risk per trade
+
 export class ExecutionRouter {
   private tradeRepo: TradeRepository;
   private settingsRepo: SettingsRepository;
   private alertManager: AlertManager;
+  private circuitBreaker: CircuitBreaker;
   private config: ExecutionConfig;
   private accountConnections: Map<string, MetaApiManager> = new Map();
 
@@ -34,12 +60,64 @@ export class ExecutionRouter {
     this.tradeRepo = new TradeRepository();
     this.settingsRepo = new SettingsRepository();
     this.alertManager = new AlertManager();
+    this.circuitBreaker = new CircuitBreaker();
     this.config = config;
+  }
+
+  async initialize(): Promise<void> {
+    await this.circuitBreaker.initialize();
+    logger.info('ExecutionRouter initialized with CircuitBreaker');
   }
 
   updateRiskPercent(riskPercent: number): void {
     this.config.defaultRiskPercent = riskPercent;
     logger.info(`ExecutionRouter risk percent updated to ${riskPercent}%`);
+  }
+
+  /**
+   * Calculate dynamic position size based on confidence and confluence
+   */
+  calculateDynamicRisk(config: DynamicPositionConfig): { 
+    riskPercent: number; 
+    tier: string;
+    multiplier: number;
+    confluenceBonus: number;
+  } {
+    // Determine confidence tier
+    let tier = 'REJECT';
+    let multiplier = 0;
+
+    if (config.confidence >= CONFIDENCE_TIERS.FULL.minConfidence) {
+      tier = 'FULL';
+      multiplier = CONFIDENCE_TIERS.FULL.multiplier;
+    } else if (config.confidence >= CONFIDENCE_TIERS.STANDARD.minConfidence) {
+      tier = 'STANDARD';
+      multiplier = CONFIDENCE_TIERS.STANDARD.multiplier;
+    } else if (config.confidence >= CONFIDENCE_TIERS.HALF.minConfidence) {
+      tier = 'HALF';
+      multiplier = CONFIDENCE_TIERS.HALF.multiplier;
+    }
+
+    // Calculate confluence bonus
+    let confluenceBonus = 0;
+    if (config.confluenceScore >= CONFLUENCE_BONUSES.EXCEPTIONAL.minScore) {
+      confluenceBonus = CONFLUENCE_BONUSES.EXCEPTIONAL.bonusPercent;
+    } else if (config.confluenceScore >= CONFLUENCE_BONUSES.HIGH.minScore) {
+      confluenceBonus = CONFLUENCE_BONUSES.HIGH.bonusPercent;
+    }
+
+    // Calculate final risk
+    const baseRisk = config.baseRiskPercent * multiplier;
+    const totalRisk = Math.min(baseRisk + confluenceBonus, MAX_TOTAL_RISK_PERCENT);
+
+    logger.info(`Dynamic position sizing: Tier=${tier}, Multiplier=${multiplier}x, ConfluenceBonus=+${confluenceBonus}%, FinalRisk=${totalRisk}%`);
+
+    return {
+      riskPercent: totalRisk,
+      tier,
+      multiplier,
+      confluenceBonus
+    };
   }
 
   async executeTrade(signal: Signal): Promise<ExecutionResult[]> {
@@ -55,11 +133,25 @@ export class ExecutionRouter {
 
     logger.info(`Found ${accounts.length} active execution accounts`);
 
+    // Calculate dynamic risk based on signal confidence and confluence
+    const confluenceScore = signal.snapshotSettings?.confluenceScore || 60;
+    const dynamicRisk = this.calculateDynamicRisk({
+      baseRiskPercent: this.config.defaultRiskPercent,
+      confidence: signal.confidence,
+      confluenceScore
+    });
+
+    // Skip if confidence tier is REJECT
+    if (dynamicRisk.tier === 'REJECT') {
+      logger.warn(`Skipping execution: confidence ${signal.confidence}% below minimum threshold`);
+      return [{ success: false, error: 'Confidence below minimum threshold' }];
+    }
+
     const results: ExecutionResult[] = [];
 
     // Execute on each account
     for (const account of accounts) {
-      const result = await this.executeOnAccount(signal, account);
+      const result = await this.executeOnAccount(signal, account, dynamicRisk.riskPercent);
       results.push(result);
     }
 
@@ -69,14 +161,30 @@ export class ExecutionRouter {
       signal.symbol,
       signal.action,
       signal.confidence,
-      `Executed on ${successCount}/${accounts.length} accounts`
+      `Executed on ${successCount}/${accounts.length} accounts (${dynamicRisk.tier} position, ${dynamicRisk.riskPercent.toFixed(2)}% risk)`
     );
 
     return results;
   }
 
-  private async executeOnAccount(signal: Signal, account: TradingAccount): Promise<ExecutionResult> {
+  private async executeOnAccount(
+    signal: Signal, 
+    account: TradingAccount,
+    riskPercent: number
+  ): Promise<ExecutionResult> {
     logger.info(`Executing on ${account.account_name} (${account.broker})...`);
+
+    // Check circuit breaker for this account
+    const circuitStatus = await this.circuitBreaker.canTrade(account.id);
+    if (!circuitStatus.canTrade) {
+      logger.warn(`Circuit breaker BLOCKED trade on ${account.account_name}: ${circuitStatus.reason}`);
+      return {
+        success: false,
+        error: `Circuit breaker: ${circuitStatus.reason}`,
+        accountId: account.id,
+        accountName: account.account_name
+      };
+    }
 
     try {
       // Get or create MetaAPI connection for this account
@@ -103,15 +211,31 @@ export class ExecutionRouter {
         };
       }
 
-      // Calculate lot size for this account
-      const stopLossPips = Math.abs(signal.entryPrice - signal.stopLoss) * getPipMultiplier(signal.symbol);
-      const lotSize = calculateLotSize(
-        balance,
-        this.config.defaultRiskPercent,
-        stopLossPips
-      );
-
-      logger.info(`${account.account_name}: Balance $${balance}, Lot size: ${lotSize}`);
+      // Calculate lot size based on asset type
+      let lotSize: number;
+      
+      if (isCryptoPair(signal.symbol)) {
+        // Crypto uses percentage-based position sizing
+        const stopLossPercent = Math.abs((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100;
+        const maxLeverage = ANTI_SCALPING.crypto.maxLeverage || 20;
+        lotSize = calculateCryptoLotSize(
+          balance,
+          riskPercent,
+          stopLossPercent,
+          signal.entryPrice,
+          maxLeverage
+        );
+        logger.info(`${account.account_name} [CRYPTO]: Balance $${balance}, Risk ${riskPercent}%, SL ${stopLossPercent.toFixed(2)}%, Lot size: ${lotSize}`);
+      } else {
+        // Forex/metals uses pip-based position sizing
+        const stopLossPips = Math.abs(signal.entryPrice - signal.stopLoss) * getPipMultiplier(signal.symbol);
+        lotSize = calculateLotSize(
+          balance,
+          riskPercent,
+          stopLossPips
+        );
+        logger.info(`${account.account_name} [FOREX]: Balance $${balance}, Risk ${riskPercent}%, Lot size: ${lotSize}`);
+      }
 
       // Execute trade
       const result = await metaApi.openTrade({
@@ -122,6 +246,14 @@ export class ExecutionRouter {
         takeProfit: signal.takeProfit1,
         comment: `TAVY-${signal.id?.slice(0, 8) || 'SIGNAL'}`
       });
+
+      // Enhance snapshot with position sizing info
+      const enhancedSnapshot = {
+        ...signal.snapshotSettings,
+        riskPercent,
+        positionTier: this.getPositionTier(signal.confidence),
+        dynamicSizing: true
+      };
 
       // Save trade to database
       await this.tradeRepo.saveTrade({
@@ -137,7 +269,7 @@ export class ExecutionRouter {
         mtPositionId: result.positionId,
         executionStatus: 'executed',
         executionAttempts: 1,
-        snapshotSettings: signal.snapshotSettings,
+        snapshotSettings: enhancedSnapshot,
         status: 'open',
         openedAt: new Date()
       });
@@ -170,6 +302,13 @@ export class ExecutionRouter {
     }
   }
 
+  private getPositionTier(confidence: number): string {
+    if (confidence >= 85) return 'FULL';
+    if (confidence >= 70) return 'STANDARD';
+    if (confidence >= 60) return 'HALF';
+    return 'REJECT';
+  }
+
   async closeTrade(positionId: string, tradeId: string, exitPrice: number): Promise<boolean> {
     try {
       // Get trade details first to find the correct account
@@ -191,10 +330,18 @@ export class ExecutionRouter {
       const pnl = this.calculatePnl(trade, exitPrice);
       await this.tradeRepo.closeTrade(tradeId, exitPrice, pnl.dollars, pnl.percent);
 
+      // Record result for circuit breaker
+      const isWin = pnl.dollars >= 0;
+      await this.circuitBreaker.recordTradeResult(
+        trade.trading_account_id,
+        isWin,
+        pnl.dollars
+      );
+
       await this.alertManager.alertTradeClosed(
         trade.symbol,
         pnl.dollars,
-        pnl.dollars >= 0 ? 'win' : 'loss'
+        isWin ? 'win' : 'loss'
       );
 
       return true;
@@ -223,5 +370,9 @@ export class ExecutionRouter {
     const percent = entryMargin > 0 ? (dollars / entryMargin) * 100 : 0;
 
     return { dollars, percent };
+  }
+
+  getCircuitBreaker(): CircuitBreaker {
+    return this.circuitBreaker;
   }
 }

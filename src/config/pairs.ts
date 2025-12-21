@@ -33,6 +33,21 @@ export const FOREX_PAIRS = [
   'XAGUSD'
 ];
 
+// Crypto CFD pairs - 24/7 trading
+export const CRYPTO_PAIRS = [
+  'BTCUSD',
+  'ETHUSD',
+  'SOLUSD',
+  'XRPUSD',
+  'LTCUSD',
+  'ADAUSD',
+  'DOTUSD',
+  'LINKUSD'
+];
+
+// All tradeable pairs
+export const ALL_PAIRS = [...FOREX_PAIRS, ...CRYPTO_PAIRS];
+
 // Pip multipliers by symbol
 export const PIP_MULTIPLIERS: Record<string, number> = {
   // JPY pairs
@@ -47,6 +62,16 @@ export const PIP_MULTIPLIERS: Record<string, number> = {
   'XAUUSD': 10,
   'XAGUSD': 1000,
 
+  // Crypto CFDs (price-based, use 1 for percentage calculations)
+  'BTCUSD': 1,
+  'ETHUSD': 1,
+  'SOLUSD': 100,
+  'XRPUSD': 10000,
+  'LTCUSD': 100,
+  'ADAUSD': 10000,
+  'DOTUSD': 1000,
+  'LINKUSD': 1000,
+
   // Default for standard pairs
   'default': 10000
 };
@@ -55,6 +80,10 @@ export const PIP_MULTIPLIERS: Record<string, number> = {
 export const MIN_TP_PIPS: Record<string, number> = {
   'XAUUSD': 50,
   'XAGUSD': 50,
+  // Crypto uses percentage-based TP, not pips
+  'BTCUSD': 100,   // $100 minimum move
+  'ETHUSD': 10,    // $10 minimum move
+  'SOLUSD': 1,     // $1 minimum move
   'default': 20
 };
 
@@ -72,4 +101,16 @@ export function priceToPips(symbol: string, priceMove: number): number {
 
 export function pipsToPrice(symbol: string, pips: number): number {
   return pips / getPipMultiplier(symbol);
+}
+
+export function isCryptoPair(symbol: string): boolean {
+  return CRYPTO_PAIRS.includes(symbol);
+}
+
+export function isForexPair(symbol: string): boolean {
+  return FOREX_PAIRS.includes(symbol);
+}
+
+export function getAssetType(symbol: string): 'forex' | 'crypto' {
+  return isCryptoPair(symbol) ? 'crypto' : 'forex';
 }

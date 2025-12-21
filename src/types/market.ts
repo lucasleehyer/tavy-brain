@@ -33,6 +33,12 @@ export interface Indicators {
   support2: number;
   resistance1: number;
   resistance2: number;
+  // Twin Range additions
+  twinRangeFilter?: number;
+  twinRangeDirection?: 'bullish' | 'bearish' | 'neutral';
+  twinRangeStrength?: number;
+  // Market structure
+  marketStructure?: 'HH_HL' | 'LH_LL' | 'ranging';
 }
 
 export interface MarketRegime {
@@ -49,4 +55,52 @@ export interface PriceData {
   spread: number;
   timestamp: Date;
   ageMs: number;
+}
+
+// Session types for trading hours
+export type TradingSession = 'london' | 'new_york' | 'london_ny_overlap' | 'asian' | 'off_hours';
+
+// Enhanced data package for AI
+export interface AIDataPackage {
+  setupId: string;
+  pair: string;
+  timeframe: string;
+  currentPrice: number;
+  confluenceScore: number;
+  
+  priceAction: {
+    keyLevelsNear: string[];
+    distanceToLevel: number;
+    candlePattern: string | null;
+    marketStructure: string;
+  };
+  
+  momentum: {
+    twinRangeDirection: string;
+    twinRangeStrength: number;
+    last3CandlesDir: string;
+    rangeExpansion: number;
+  };
+  
+  context: {
+    session: TradingSession;
+    newsRisk: 'low' | 'medium' | 'high';
+    weeklyTrend: string;
+  };
+  
+  calculatedFeatures: {
+    atr14: number;
+    spread: number;
+    rsi: number;
+    adx: number;
+  };
+  
+  potentialTrade: {
+    direction: 'long' | 'short';
+    nearestSupport: number | null;
+    nearestResistance: number | null;
+    naturalSlDistance: number;
+    naturalTpDistance: number;
+    potentialRR: number;
+  };
 }

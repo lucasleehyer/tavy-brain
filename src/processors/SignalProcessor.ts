@@ -1,15 +1,20 @@
 import { MetaApiManager } from '../services/websocket/MetaApiManager';
 import { PreFilter } from '../services/analysis/PreFilter';
+import { CryptoPreFilter } from '../services/analysis/CryptoPreFilter';
 import { RegimeDetector } from '../services/analysis/RegimeDetector';
 import { AICouncil } from '../services/ai/AICouncil';
 import { ExecutionRouter } from '../services/execution/ExecutionRouter';
 import { SignalRepository } from '../services/database/SignalRepository';
 import { SettingsRepository } from '../services/database/SettingsRepository';
+import { KellyCalculator } from '../services/risk/KellyCalculator';
+import { MomentumTracker } from '../services/risk/MomentumTracker';
+import { DrawdownManager } from '../services/risk/DrawdownManager';
 import { activityLogger } from '../services/database/ActivityLogger';
 import { logger } from '../utils/logger';
 import { Tick, Candle } from '../types/market';
-import { TradingThresholds } from '../config/thresholds';
-import { isForexMarketOpen, getCurrentSession } from '../utils/helpers';
+import { TradingThresholds, CRYPTO_THRESHOLDS } from '../config/thresholds';
+import { isMarketOpen, getCurrentSession } from '../utils/helpers';
+import { getAssetType, isCryptoPair } from '../config/pairs';
 
 interface ProcessingState {
   lastProcessed: Map<string, number>;
@@ -17,6 +22,7 @@ interface ProcessingState {
   pendingCount: number;
   dailyApiCalls: number;
   lastApiCallReset: Date;
+  dailyTradeCount: number;
 }
 
 interface MultiTimeframeCandles {
@@ -29,18 +35,23 @@ interface MultiTimeframeCandles {
 export class SignalProcessor {
   private metaApi: MetaApiManager;
   private preFilter: PreFilter;
+  private cryptoPreFilter: CryptoPreFilter;
   private regimeDetector: RegimeDetector;
   private aiCouncil: AICouncil;
   private executionRouter: ExecutionRouter;
   private signalRepo: SignalRepository;
   private settingsRepo: SettingsRepository;
+  private kellyCalculator: KellyCalculator;
+  private momentumTracker: MomentumTracker;
+  private drawdownManager: DrawdownManager;
   private settings: TradingThresholds;
   private state: ProcessingState;
   private isRunning: boolean = true;
 
-  // Process interval: 15 minutes (matches candle timeframe, reduces API calls)
-  private readonly PROCESS_INTERVAL = 900000; // 15 minutes
-  private readonly MAX_DAILY_API_CALLS = 200;
+  // AGGRESSIVE: Faster processing for crypto (5 min), standard for forex (15 min)
+  private readonly CRYPTO_PROCESS_INTERVAL = 300000; // 5 minutes
+  private readonly FOREX_PROCESS_INTERVAL = 900000;  // 15 minutes
+  private readonly MAX_DAILY_API_CALLS = 300; // Increased for aggressive mode
 
   constructor(metaApi: MetaApiManager, settings: TradingThresholds) {
     this.metaApi = metaApi;
@@ -49,10 +60,14 @@ export class SignalProcessor {
       minAtrPips: settings.minAtrPips,
       momentumThresholdPips: settings.momentumThresholdPips
     });
+    this.cryptoPreFilter = new CryptoPreFilter();
     this.regimeDetector = new RegimeDetector();
     this.aiCouncil = new AICouncil();
     this.signalRepo = new SignalRepository();
     this.settingsRepo = new SettingsRepository();
+    this.kellyCalculator = new KellyCalculator({ kellyFraction: 0.5, maxRiskPercent: 5 });
+    this.momentumTracker = new MomentumTracker();
+    this.drawdownManager = new DrawdownManager();
 
     // Initialize execution router with default risk (will be overridden from DB)
     this.executionRouter = new ExecutionRouter({
@@ -65,15 +80,35 @@ export class SignalProcessor {
       pendingAnalysis: new Set(),
       pendingCount: 0,
       dailyApiCalls: 0,
-      lastApiCallReset: new Date()
+      lastApiCallReset: new Date(),
+      dailyTradeCount: 0
     };
+
+    // Initialize risk managers
+    this.initializeRiskManagers();
+  }
+
+  private async initializeRiskManagers(): Promise<void> {
+    try {
+      await Promise.all([
+        this.momentumTracker.initialize(),
+        this.drawdownManager.initialize()
+      ]);
+      logger.info('[SIGNAL-PROCESSOR] Risk managers initialized');
+    } catch (error) {
+      logger.error('Failed to initialize risk managers:', error);
+    }
+  }
   }
 
   async processTick(tick: Tick): Promise<void> {
     if (!this.isRunning) return;
 
-    // Check if forex market is open
-    if (!isForexMarketOpen()) {
+    const isCrypto = isCryptoPair(tick.symbol);
+    const processInterval = isCrypto ? this.CRYPTO_PROCESS_INTERVAL : this.FOREX_PROCESS_INTERVAL;
+
+    // Check if market is open for this symbol (forex has schedule, crypto is 24/7)
+    if (!isMarketOpen(tick.symbol)) {
       return;
     }
 
@@ -92,9 +127,9 @@ export class SignalProcessor {
       return;
     }
 
-    // Check if we recently processed this symbol (15 min interval)
+    // Check if we recently processed this symbol (faster for crypto)
     const lastProcessed = this.state.lastProcessed.get(tick.symbol) || 0;
-    if (Date.now() - lastProcessed < this.PROCESS_INTERVAL) {
+    if (Date.now() - lastProcessed < processInterval) {
       return;
     }
 
@@ -129,6 +164,8 @@ export class SignalProcessor {
   }
 
   private async analyzeSymbol(symbol: string, tick: Tick): Promise<void> {
+    const assetType = getAssetType(symbol);
+    
     try {
       // Log that we're analyzing
       await activityLogger.logAnalyzing(symbol);
@@ -149,7 +186,7 @@ export class SignalProcessor {
         await this.signalRepo.logDecision({
           userId: 'system',
           symbol,
-          assetType: 'forex',
+          assetType,
           decision: 'REJECTED',
           decisionType: 'pre_filter',
           confidence: 0,
@@ -182,7 +219,7 @@ export class SignalProcessor {
       // Run AI Council with multi-timeframe data
       const decision = await this.aiCouncil.analyze({
         symbol,
-        assetType: 'forex',
+        assetType,
         currentPrice: (tick.bid + tick.ask) / 2,
         candles: mtfCandles,
         indicators: preFilterResult.indicators!,
@@ -195,7 +232,7 @@ export class SignalProcessor {
       await this.signalRepo.logDecision({
         userId: 'system',
         symbol,
-        assetType: 'forex',
+        assetType,
         decision: decision.action,
         decisionType: 'ai_council',
         confidence: decision.confidence,
@@ -242,11 +279,13 @@ export class SignalProcessor {
     accountBalance: number,
     riskPercent: number
   ): Promise<void> {
+    const assetType = getAssetType(symbol);
+    
     // Save signal first
     const signalId = await this.signalRepo.saveSignal({
       userId: 'system',
       symbol,
-      assetType: 'forex',
+      assetType,
       action: decision.action,
       confidence: decision.confidence,
       entryPrice: decision.entryPrice,
@@ -274,7 +313,7 @@ export class SignalProcessor {
       id: signalId,
       userId: 'system',
       symbol,
-      assetType: 'forex',
+      assetType,
       action: decision.action,
       confidence: decision.confidence,
       entryPrice: decision.entryPrice,
