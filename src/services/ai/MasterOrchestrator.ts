@@ -39,6 +39,14 @@ const AGGRESSIVE_CONFIG = {
   }
 };
 
+// EXPLOSIVE TREND MODE - when predictor detects contest-winning momentum
+const EXPLOSIVE_CONFIG = {
+  minConfidence: 50,      // Even lower threshold for explosive trends
+  maxRiskMultiplier: 1.5, // Allow 1.5x normal position size
+  bypassAgentConsensus: true, // Trust predictor if trend is explosive
+  minTrendStrength: 'explosive' as const
+};
+
 export class MasterOrchestrator {
   private client: DeepSeekClient | null = null;
 
@@ -68,11 +76,25 @@ export class MasterOrchestrator {
     const isCrypto = isCryptoPair(input.symbol);
     const aggressiveMode = input.aggressiveMode ?? true; // Default to aggressive for paper trading
     
+    // Check for EXPLOSIVE trend from predictor
+    const isExplosiveTrend = input.agentOutputs.predictor?.trendStrength === 'explosive';
+    const explosiveBonus = isExplosiveTrend ? 10 : 0; // +10% confidence for explosive trends
+    
+    if (isExplosiveTrend) {
+      logger.info(`[ORCHESTRATOR] 🔥 EXPLOSIVE TREND detected for ${input.symbol}!`);
+      logger.info(`[ORCHESTRATOR] Predictor recommendation: ${input.agentOutputs.predictor?.recommendation}`);
+      if (input.agentOutputs.predictor?.priceTargets) {
+        const targets = input.agentOutputs.predictor.priceTargets;
+        logger.info(`[ORCHESTRATOR] 24h target: $${targets.hours24?.price} (${targets.hours24?.probability}%)`);
+        logger.info(`[ORCHESTRATOR] 7d target: $${targets.days7?.price} (${targets.days7?.probability}%)`);
+      }
+    }
+    
     // Use deepseek-reasoner for critical trading decisions (thinking mode)
     const response = await client.chat(
       [
-        { role: 'system', content: this.getSystemPrompt(input.assetType, aggressiveMode) },
-        { role: 'user', content: this.getUserPrompt(input, aggressiveMode) }
+        { role: 'system', content: this.getSystemPrompt(input.assetType, aggressiveMode, isExplosiveTrend) },
+        { role: 'user', content: this.getUserPrompt(input, aggressiveMode, isExplosiveTrend) }
       ],
       { model: 'deepseek-reasoner', temperature: 0.2, maxTokens: 4096 }
     );
@@ -82,10 +104,10 @@ export class MasterOrchestrator {
       logger.debug('DeepSeek Reasoner thinking:', response.reasoningContent.slice(0, 500));
     }
 
-    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus);
+    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus, explosiveBonus);
   }
 
-  private getSystemPrompt(assetType: string, aggressiveMode: boolean): string {
+  private getSystemPrompt(assetType: string, aggressiveMode: boolean, isExplosiveTrend: boolean = false): string {
     const aggressiveConfig = assetType === 'crypto' ? AGGRESSIVE_CONFIG.crypto : AGGRESSIVE_CONFIG.forex;
     
     let antiScalpingRule: string;
@@ -200,7 +222,7 @@ If fewer than ${aggressiveConfig.minChecks} boxes checked: HOLD
 }`;
   }
 
-  private getUserPrompt(input: OrchestratorInput, aggressiveMode: boolean): string {
+  private getUserPrompt(input: OrchestratorInput, aggressiveMode: boolean, isExplosiveTrend: boolean = false): string {
     const modeNote = aggressiveMode 
       ? '\n⚡ AGGRESSIVE MODE ACTIVE - Be more willing to take trades with good setups. This is paper trading.\n' 
       : '';
@@ -209,10 +231,37 @@ If fewer than ${aggressiveConfig.minChecks} boxes checked: HOLD
       ? `\n🔥 MOMENTUM BONUS: +${input.momentumBonus}% confidence boost from winning streak\n`
       : '';
 
+    // Add explosive trend info if detected
+    let explosiveNote = '';
+    if (isExplosiveTrend && input.agentOutputs.predictor) {
+      const predictor = input.agentOutputs.predictor;
+      explosiveNote = `
+═══════════════════════════════════════════════════════════════
+🔥🔥🔥 EXPLOSIVE TREND DETECTED - CONTEST-WINNING SETUP 🔥🔥🔥
+═══════════════════════════════════════════════════════════════
+Trend Strength: ${predictor.trendStrength?.toUpperCase()}
+Recommendation: ${predictor.recommendation}
+Confluence Score: ${predictor.confluenceScore || 0}%
+${predictor.priceTargets ? `
+BOLD PRICE TARGETS:
+- 24h: $${predictor.priceTargets.hours24?.price} (${predictor.priceTargets.hours24?.probability}% probability)
+- 3-day: $${predictor.priceTargets.days3?.price} (${predictor.priceTargets.days3?.probability}% probability)
+- 7-day: $${predictor.priceTargets.days7?.price} (${predictor.priceTargets.days7?.probability}% probability)
+- Max Downside: $${predictor.maxDownside}
+` : ''}
+⚡ EXPLOSIVE TREND RULES:
+- Lower confidence threshold to 50%
+- Trust predictor over other agents
+- Allow 1.5x normal position size
+- This is a CONTEST-WINNING setup!
+═══════════════════════════════════════════════════════════════
+`;
+    }
+
     return `═══════════════════════════════════════════════════════════════
                          ANALYZE THIS SETUP
 ═══════════════════════════════════════════════════════════════
-${modeNote}${momentumNote}
+${modeNote}${momentumNote}${explosiveNote}
 SYMBOL: ${input.symbol} (${input.assetType})
 CURRENT PRICE: ${input.currentPrice}
 MARKET REGIME: ${JSON.stringify(input.regime)}
@@ -238,6 +287,7 @@ ACCOUNT CONTEXT:
 ═══════════════════════════════════════════════════════════════
 
 Apply the ${aggressiveMode ? 'AGGRESSIVE' : 'IRON'} RULES and ENTRY CHECKLIST. Synthesize all inputs.
+${isExplosiveTrend ? '⚡ EXPLOSIVE TREND MODE - Trust the predictor and be BOLD!' : ''}
 Provide your trading decision as JSON.`;
   }
 
@@ -246,7 +296,8 @@ Provide your trading decision as JSON.`;
     currentPrice: number, 
     isCrypto: boolean,
     aggressiveMode: boolean,
-    momentumBonus?: number
+    momentumBonus?: number,
+    explosiveBonus: number = 0
   ): SignalDecision {
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -259,11 +310,15 @@ Provide your trading decision as JSON.`;
           predictor: parsed.agent_scores?.predictor || 50
         };
 
-        // Apply momentum bonus to confidence
+        // Apply momentum bonus and explosive bonus to confidence
         let adjustedConfidence = parsed.confidence || 0;
         if (momentumBonus && momentumBonus > 0) {
           adjustedConfidence = Math.min(100, adjustedConfidence + momentumBonus);
-          logger.info(`[ORCHESTRATOR] Confidence boosted: ${parsed.confidence}% + ${momentumBonus}% = ${adjustedConfidence}%`);
+          logger.info(`[ORCHESTRATOR] Momentum boost: ${parsed.confidence}% + ${momentumBonus}% = ${adjustedConfidence}%`);
+        }
+        if (explosiveBonus > 0) {
+          adjustedConfidence = Math.min(100, adjustedConfidence + explosiveBonus);
+          logger.info(`[ORCHESTRATOR] 🔥 Explosive trend boost: +${explosiveBonus}% = ${adjustedConfidence}%`);
         }
 
         // Validate R:R ratio with aggressive thresholds
@@ -271,19 +326,23 @@ Provide your trading decision as JSON.`;
           const slDistance = Math.abs(parsed.entry_price - parsed.stop_loss);
           const tp1Distance = Math.abs(parsed.take_profit_1 - parsed.entry_price);
           
+          // Explosive mode: even lower R:R allowed (1.2 for crypto)
           // Aggressive mode: 1.3 for crypto, 1.5 for forex
-          const minRR = aggressiveMode ? (isCrypto ? 1.3 : 1.5) : 2.0;
+          const isExplosive = explosiveBonus > 0;
+          const minRR = isExplosive 
+            ? (isCrypto ? 1.2 : 1.3) 
+            : (aggressiveMode ? (isCrypto ? 1.3 : 1.5) : 2.0);
           
           if (tp1Distance < slDistance * minRR) {
             logger.warn(`R:R ratio ${(tp1Distance/slDistance).toFixed(2)}:1 below minimum ${minRR}:1`);
             
-            // In aggressive mode, try to adjust TP instead of rejecting
-            if (aggressiveMode) {
+            // In aggressive/explosive mode, try to adjust TP instead of rejecting
+            if (aggressiveMode || isExplosive) {
               const adjustedTp1 = parsed.action === 'BUY' 
                 ? parsed.entry_price + (slDistance * minRR)
                 : parsed.entry_price - (slDistance * minRR);
               
-              logger.info(`[AGGRESSIVE] Adjusted TP1: ${parsed.take_profit_1} -> ${adjustedTp1}`);
+              logger.info(`[${isExplosive ? 'EXPLOSIVE' : 'AGGRESSIVE'}] Adjusted TP1: ${parsed.take_profit_1} -> ${adjustedTp1}`);
               parsed.take_profit_1 = adjustedTp1;
             } else {
               return this.getHoldDecision(currentPrice, `R:R ratio below ${minRR}:1 minimum`);
