@@ -45,7 +45,7 @@ app.get('/status', (req, res) => {
     uptime: process.uptime(),
     uptimeFormatted: `${Math.floor(process.uptime() / 60)}m ${Math.floor(process.uptime() % 60)}s`,
     memory: process.memoryUsage(),
-    metaApiConnected: metaApiInstance?.isConnected() || false
+    metaApiConnected: metaApiInstance?.isReady() || false
   });
 });
 
@@ -214,25 +214,17 @@ async function initialize() {
       pairs = process.env.TRADING_PAIRS.split(',');
       logger.info(`Using manual TRADING_PAIRS override: ${pairs.length} symbols`);
     } else if (process.env.AUTO_DISCOVER_SYMBOLS === 'true') {
-      // Full auto-discovery - subscribe to ALL available symbols
+      // Full auto-discovery - subscribe to ALL available symbols (DANGEROUS - HIGH API USAGE!)
       pairs = availableSymbols;
-      logger.info(`Auto-discovery enabled: subscribing to ALL ${pairs.length} symbols`);
+      logger.info(`⚠️ Auto-discovery enabled: subscribing to ALL ${pairs.length} symbols (not recommended!)`);
     } else {
-      // Default: Combine auto-discovered forex with hardcoded crypto from pairs.ts
-      // (FBS crypto CFDs aren't classified correctly by auto-discovery)
-      const autoDiscoveredForex = symbolsByType.forex;
-      const autoDiscoveredCommodities = symbolsByType.commodities;
+      // DEFAULT: Use curated pairs from pairs.ts (RECOMMENDED)
+      // Only subscribe to symbols we actually trade - not ALL broker symbols!
+      pairs = ALL_PAIRS;
+      logger.info(`Using curated pairs list: ${FOREX_PAIRS.length} forex + ${CRYPTO_PAIRS.length} crypto = ${pairs.length} total`);
       
-      // Use auto-discovered forex if available, otherwise use hardcoded
-      const forexToUse = autoDiscoveredForex.length > 0 ? autoDiscoveredForex : FOREX_PAIRS;
-      
-      // Always use hardcoded crypto (auto-discovery unreliable for crypto CFDs)
-      const cryptoToUse = CRYPTO_PAIRS;
-      
-      // Combine all: forex + crypto + commodities (dedupe)
-      pairs = [...new Set([...forexToUse, ...cryptoToUse, ...autoDiscoveredCommodities])];
-      
-      logger.info(`Using ${forexToUse.length} forex + ${cryptoToUse.length} crypto + ${autoDiscoveredCommodities.length} commodities = ${pairs.length} total pairs`);
+      // Log what broker offers vs what we use (for debugging)
+      logger.info(`📊 Broker offers ${availableSymbols.length} symbols, but TAVY only trades ${pairs.length}`);
     }
 
     // Fallback if no pairs discovered
