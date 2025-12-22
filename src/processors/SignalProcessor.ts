@@ -48,10 +48,12 @@ export class SignalProcessor {
   private state: ProcessingState;
   private isRunning: boolean = true;
 
-  // AGGRESSIVE: Faster processing for crypto (5 min), standard for forex (15 min)
-  private readonly CRYPTO_PROCESS_INTERVAL = 300000; // 5 minutes
-  private readonly FOREX_PROCESS_INTERVAL = 900000;  // 15 minutes
-  private readonly MAX_DAILY_API_CALLS = 300; // Increased for aggressive mode
+  // Processing intervals by asset type
+  private readonly CRYPTO_PROCESS_INTERVAL = 300000;  // 5 minutes for crypto
+  private readonly FOREX_PROCESS_INTERVAL = 900000;   // 15 minutes for forex
+  private readonly STOCK_PROCESS_INTERVAL = 1800000;  // 30 minutes for stocks (API protection)
+  private readonly INDEX_PROCESS_INTERVAL = 1200000;  // 20 minutes for indices
+  private readonly MAX_DAILY_API_CALLS = 200; // Conservative limit for full auto-discovery
 
   constructor(metaApi: MetaApiManager, settings: TradingThresholds) {
     this.metaApi = metaApi;
@@ -99,13 +101,22 @@ export class SignalProcessor {
       logger.error('Failed to initialize risk managers:', error);
     }
   }
+
+  private getProcessInterval(assetType: string, isCrypto: boolean): number {
+    if (isCrypto) return this.CRYPTO_PROCESS_INTERVAL;
+    if (assetType === 'stock') return this.STOCK_PROCESS_INTERVAL;
+    if (assetType === 'index') return this.INDEX_PROCESS_INTERVAL;
+    return this.FOREX_PROCESS_INTERVAL; // Default for forex, commodities, etc.
   }
 
   async processTick(tick: Tick): Promise<void> {
     if (!this.isRunning) return;
 
     const isCrypto = isCryptoPair(tick.symbol);
-    const processInterval = isCrypto ? this.CRYPTO_PROCESS_INTERVAL : this.FOREX_PROCESS_INTERVAL;
+    const assetType = getAssetType(tick.symbol);
+    
+    // Get appropriate processing interval based on asset type
+    const processInterval = this.getProcessInterval(assetType, isCrypto);
 
     // Check if market is open for this symbol (forex has schedule, crypto is 24/7)
     if (!isMarketOpen(tick.symbol)) {
@@ -214,7 +225,7 @@ export class SignalProcessor {
 
       // Increment API call counter (we're about to call AI)
       this.state.dailyApiCalls++;
-      logger.info(`Daily API calls: ${this.state.dailyApiCalls}/${this.MAX_DAILY_API_CALLS}`);
+      logger.info(`[API-USAGE] ${symbol} (${assetType}) | Calls: ${this.state.dailyApiCalls}/${this.MAX_DAILY_API_CALLS} | Remaining: ${this.MAX_DAILY_API_CALLS - this.state.dailyApiCalls}`);
 
       // Run AI Council with multi-timeframe data
       const decision = await this.aiCouncil.analyze({
