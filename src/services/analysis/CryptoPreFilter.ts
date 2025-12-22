@@ -1,12 +1,12 @@
-import { Candle } from '../../types/market';
-import { IndicatorCalculator, IndicatorResult } from './IndicatorCalculator';
+import { Candle, Indicators } from '../../types/market';
+import { IndicatorCalculator } from './IndicatorCalculator';
 import { CRYPTO_THRESHOLDS } from '../../config/thresholds';
 import { logger } from '../../utils/logger';
 
 interface CryptoPreFilterResult {
   passed: boolean;
   reason?: string;
-  indicators?: IndicatorResult;
+  indicators?: Indicators;
   volumeSpike?: boolean;
   momentumStrength?: number;
   volatilityPercent?: number;
@@ -147,7 +147,7 @@ export class CryptoPreFilter {
   /**
    * Calculate momentum strength (0-1)
    */
-  private calculateMomentumStrength(indicators: IndicatorResult): number {
+  private calculateMomentumStrength(indicators: Indicators): number {
     let score = 0;
 
     // RSI momentum (not at extremes = trending)

@@ -1,4 +1,4 @@
-import { SupabaseClient } from '../database/SupabaseClient';
+import { supabase } from '../database/SupabaseClient';
 import { logger } from '../../utils/logger';
 
 interface TradeAnalysis {
@@ -47,11 +47,10 @@ interface WeeklyReport {
 }
 
 export class PerformanceAnalyzer {
-  private supabase: SupabaseClient;
   private minSampleSize: number = 10;
 
   constructor() {
-    this.supabase = new SupabaseClient();
+    // Uses imported supabase singleton
   }
 
   async runWeeklyAnalysis(): Promise<WeeklyReport> {
@@ -93,7 +92,7 @@ export class PerformanceAnalyzer {
 
   private async fetchClosedTrades(startDate: Date, endDate: Date): Promise<any[]> {
     try {
-      const { data, error } = await this.supabase.client
+      const { data, error } = await supabase
         .from('trade_analytics')
         .select('*')
         .gte('closed_at', startDate.toISOString())
@@ -298,7 +297,7 @@ export class PerformanceAnalyzer {
 
   private async saveReport(report: WeeklyReport): Promise<void> {
     try {
-      await this.supabase.client
+      await supabase
         .from('ai_optimization_runs')
         .insert({
           run_date: report.startDate,
@@ -319,7 +318,7 @@ export class PerformanceAnalyzer {
         });
 
       // Also log to VPS activity
-      await this.supabase.client
+      await supabase
         .from('vps_activity_logs')
         .insert({
           activity_type: 'performance_analysis',
@@ -354,7 +353,7 @@ export class PerformanceAnalyzer {
 
   async getHistoricalReports(count: number = 4): Promise<any[]> {
     try {
-      const { data, error } = await this.supabase.client
+      const { data, error } = await supabase
         .from('ai_optimization_runs')
         .select('*')
         .order('run_date', { ascending: false })
