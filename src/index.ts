@@ -16,9 +16,12 @@ let initializationState = {
   supabase: false,
   metaApi: false,
   error: null as string | null,
+  lastError: null as string | null,
+  initializationStep: 'pending' as string,
   subscribedPairs: 0,
   openPositions: 0,
-  pendingSignals: 0
+  pendingSignals: 0,
+  startedAt: new Date().toISOString()
 };
 
 // START EXPRESS SERVER IMMEDIATELY (before any async work)
@@ -40,7 +43,9 @@ app.get('/status', (req, res) => {
     ...initializationState,
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    memory: process.memoryUsage()
+    uptimeFormatted: `${Math.floor(process.uptime() / 60)}m ${Math.floor(process.uptime() % 60)}s`,
+    memory: process.memoryUsage(),
+    metaApiConnected: metaApiInstance?.isConnected() || false
   });
 });
 
@@ -105,67 +110,91 @@ logger.info(`Timezone: ${process.env.TZ || 'UTC'}`);
 
 // Now do async initialization in background
 async function initialize() {
-  // Validate required environment variables (METAAPI_ACCOUNT_ID now optional - read from DB)
-  const requiredEnvVars = [
-    'METAAPI_TOKEN',
-    'SUPABASE_URL',
-    'SUPABASE_ANON_KEY',
-    'TAVY_SERVICE_EMAIL',
-    'TAVY_SERVICE_PASSWORD'
-  ];
+  const updateStep = (step: string) => {
+    initializationState.initializationStep = step;
+    logger.info(`📍 INIT STEP: ${step}`);
+  };
 
-  for (const envVar of requiredEnvVars) {
-    if (!process.env[envVar]) {
-      logger.error(`Missing required environment variable: ${envVar}`);
-      initializationState.status = 'failed';
-      initializationState.error = `Missing env: ${envVar}`;
-      return;
+  const setError = (error: string) => {
+    initializationState.lastError = error;
+    logger.error(`❌ INIT ERROR: ${error}`);
+  };
+
+  try {
+    updateStep('1/10: Validating environment variables');
+    
+    // Validate required environment variables (METAAPI_ACCOUNT_ID now optional - read from DB)
+    const requiredEnvVars = [
+      'METAAPI_TOKEN',
+      'SUPABASE_URL',
+      'SUPABASE_ANON_KEY',
+      'TAVY_SERVICE_EMAIL',
+      'TAVY_SERVICE_PASSWORD'
+    ];
+
+    for (const envVar of requiredEnvVars) {
+      if (!process.env[envVar]) {
+        setError(`Missing required environment variable: ${envVar}`);
+        initializationState.status = 'failed';
+        initializationState.error = `Missing env: ${envVar}`;
+        return;
+      }
     }
-  }
+    logger.info('✅ All required env vars present');
 
-  // Initialize Supabase with service account authentication
-  logger.info('Authenticating to Supabase...');
-  try {
-    await SupabaseManager.getInstance().initialize();
-    initializationState.supabase = true;
-    logger.info('Supabase authenticated');
-  } catch (error) {
-    logger.error('Supabase auth failed:', error);
-    initializationState.error = 'Supabase auth failed';
-    initializationState.status = 'degraded';
-  }
+    // Initialize Supabase with service account authentication
+    updateStep('2/10: Authenticating to Supabase');
+    try {
+      await SupabaseManager.getInstance().initialize();
+      initializationState.supabase = true;
+      logger.info('✅ Supabase authenticated');
+    } catch (error) {
+      setError(`Supabase auth failed: ${(error as Error).message}`);
+      initializationState.error = 'Supabase auth failed';
+      initializationState.status = 'degraded';
+      // Continue anyway - some features may still work
+    }
 
-  // Initialize settings repository first to get price source
-  const settingsRepo = new SettingsRepository();
-  const alertManager = new AlertManager();
+    // Initialize settings repository first to get price source
+    const settingsRepo = new SettingsRepository();
+    const alertManager = new AlertManager();
 
-  try {
-    // Load settings from database
+    updateStep('3/10: Loading settings from database');
     const settings = await settingsRepo.loadSettings();
-    logger.info('Settings loaded:', JSON.stringify(settings, null, 2));
+    logger.info('✅ Settings loaded');
 
-    // Get price source account from database (with env var fallback)
+    updateStep('4/10: Getting price source account');
     const priceSourceAccount = await settingsRepo.getPriceSourceAccount();
     const priceSourceAccountId = priceSourceAccount?.metaapi_account_id || process.env.METAAPI_ACCOUNT_ID;
     
     if (!priceSourceAccountId) {
       throw new Error('No price source account configured in database or environment');
     }
+    logger.info(`✅ Using price source: ${priceSourceAccount?.account_name || 'ENV fallback'} (${priceSourceAccountId.slice(0, 8)}...)`);
 
-    logger.info(`Using price source: ${priceSourceAccount?.account_name || 'ENV fallback'} (${priceSourceAccountId.slice(0, 8)}...)`);
-
-    // Initialize MetaAPI with price source account
+    updateStep('5/10: Initializing MetaAPI manager');
     const metaApi = new MetaApiManager(priceSourceAccountId);
     metaApiInstance = metaApi; // Store reference for /symbols endpoint
+    logger.info('✅ MetaAPI manager created');
 
-    // Connect to MetaAPI WebSocket
-    logger.info('Connecting to MetaAPI...');
+    updateStep('6/10: Connecting to MetaAPI WebSocket');
     await metaApi.connect();
     initializationState.metaApi = true;
+    logger.info('✅ MetaAPI WebSocket connected');
 
     // Wait for broker to send symbol specifications (up to 30 seconds)
-    const specsCount = await metaApi.waitForSpecifications(30000);
+    updateStep('7/10: Waiting for broker symbol specifications');
+    let specsCount = 0;
+    try {
+      specsCount = await metaApi.waitForSpecifications(30000);
+      logger.info(`✅ Received ${specsCount} symbol specifications from broker`);
+    } catch (specError) {
+      setError(`waitForSpecifications failed: ${(specError as Error).message}`);
+      logger.warn('⚠️ Spec wait failed, continuing with hardcoded pairs...');
+      // Continue anyway - we'll use hardcoded pairs
+    }
 
+    updateStep('8/10: Discovering available symbols');
     // Auto-discover available symbols from broker
     const availableSymbols = metaApi.getAvailableSymbols();
     const symbolsByType = metaApi.getSymbolsByType();
@@ -206,10 +235,20 @@ async function initialize() {
       logger.info(`Using ${forexToUse.length} forex + ${cryptoToUse.length} crypto + ${autoDiscoveredCommodities.length} commodities = ${pairs.length} total pairs`);
     }
 
+    // Fallback if no pairs discovered
+    if (pairs.length === 0) {
+      logger.warn('⚠️ No pairs discovered, falling back to ALL_PAIRS from config');
+      pairs = ALL_PAIRS;
+    }
+
+    updateStep('9/10: Subscribing to symbol feeds');
     logger.info(`Subscribing to ${pairs.length} pairs...`);
     await metaApi.subscribeToSymbols(pairs);
     initializationState.subscribedPairs = pairs.length;
+    logger.info(`✅ Subscribed to ${pairs.length} pairs`);
 
+    updateStep('10/10: Setting up processors and event handlers');
+    
     // Log active execution accounts
     const executionAccounts = await settingsRepo.getActiveExecutionAccounts();
     logger.info(`Found ${executionAccounts.length} active execution accounts:`);
@@ -257,6 +296,7 @@ async function initialize() {
 
     // Update initialization state
     initializationState.status = 'ready';
+    initializationState.initializationStep = 'complete';
     initializationState.openPositions = positionMonitor.getPositionCount();
     initializationState.pendingSignals = signalProcessor.getPendingCount();
 
@@ -298,10 +338,20 @@ async function initialize() {
     logger.info('✅ TAVY Brain is running and ready');
 
   } catch (error) {
-    logger.error('Error during initialization:', error);
-    initializationState.error = (error as Error).message;
+    const errorMsg = (error as Error).message;
+    const errorStack = (error as Error).stack;
+    logger.error('❌ FATAL: Error during initialization:', error);
+    logger.error('Stack trace:', errorStack);
+    initializationState.error = errorMsg;
+    initializationState.lastError = `${initializationState.initializationStep}: ${errorMsg}`;
     initializationState.status = 'degraded';
-    await alertManager.sendAlert('critical', 'Initialization Failed', (error as Error).message);
+    
+    try {
+      const alertManager = new AlertManager();
+      await alertManager.sendAlert('critical', 'Initialization Failed', `Step: ${initializationState.initializationStep}\nError: ${errorMsg}`);
+    } catch (alertError) {
+      logger.error('Failed to send alert:', alertError);
+    }
   }
 }
 
