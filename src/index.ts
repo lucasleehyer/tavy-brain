@@ -189,21 +189,21 @@ async function initialize() {
       pairs = availableSymbols;
       logger.info(`Auto-discovery enabled: subscribing to ALL ${pairs.length} symbols`);
     } else {
-      // Default: Use forex + crypto + commodities from auto-discovery, fallback to pairs.ts
-      const autoDiscoveredPairs = [
-        ...symbolsByType.forex,
-        ...symbolsByType.crypto,
-        ...symbolsByType.commodities
-      ];
+      // Default: Combine auto-discovered forex with hardcoded crypto from pairs.ts
+      // (FBS crypto CFDs aren't classified correctly by auto-discovery)
+      const autoDiscoveredForex = symbolsByType.forex;
+      const autoDiscoveredCommodities = symbolsByType.commodities;
       
-      if (autoDiscoveredPairs.length > 0) {
-        pairs = autoDiscoveredPairs;
-        logger.info(`Auto-discovered ${pairs.length} tradeable pairs (forex + crypto + commodities)`);
-      } else {
-        // Fallback to hardcoded pairs if auto-discovery returns empty
-        pairs = ALL_PAIRS;
-        logger.warn(`Auto-discovery returned empty, falling back to hardcoded ${pairs.length} pairs`);
-      }
+      // Use auto-discovered forex if available, otherwise use hardcoded
+      const forexToUse = autoDiscoveredForex.length > 0 ? autoDiscoveredForex : FOREX_PAIRS;
+      
+      // Always use hardcoded crypto (auto-discovery unreliable for crypto CFDs)
+      const cryptoToUse = CRYPTO_PAIRS;
+      
+      // Combine all: forex + crypto + commodities (dedupe)
+      pairs = [...new Set([...forexToUse, ...cryptoToUse, ...autoDiscoveredCommodities])];
+      
+      logger.info(`Using ${forexToUse.length} forex + ${cryptoToUse.length} crypto + ${autoDiscoveredCommodities.length} commodities = ${pairs.length} total pairs`);
     }
 
     logger.info(`Subscribing to ${pairs.length} pairs...`);
