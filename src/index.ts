@@ -8,7 +8,7 @@ import { SettingsRepository } from './services/database/SettingsRepository';
 import { AlertManager } from './services/notifications/AlertManager';
 import { ThresholdOptimizer } from './services/ai/ThresholdOptimizer';
 import { logger } from './utils/logger';
-import { ALL_PAIRS } from './config/pairs';
+import { ALL_PAIRS, FOREX_PAIRS } from './config/pairs';
 
 // Track initialization state
 let initializationState = {
@@ -49,6 +49,48 @@ app.get('/', (req, res) => {
     name: 'TAVY Brain',
     version: '1.0.0',
     status: initializationState.status
+  });
+});
+
+// Store metaApi reference for /symbols endpoint
+let metaApiInstance: MetaApiManager | null = null;
+
+// Debug endpoint to see all available symbols from broker
+app.get('/symbols', (req, res) => {
+  if (!metaApiInstance) {
+    return res.status(503).json({
+      error: 'MetaAPI not initialized yet',
+      status: initializationState.status
+    });
+  }
+
+  const available = metaApiInstance.getAvailableSymbols();
+  const subscribed = metaApiInstance.getSubscribedSymbols();
+  const byType = metaApiInstance.getSymbolsByType();
+
+  res.json({
+    summary: {
+      available: available.length,
+      subscribed: subscribed.length,
+      byType: {
+        forex: byType.forex.length,
+        crypto: byType.crypto.length,
+        indices: byType.indices.length,
+        commodities: byType.commodities.length,
+        stocks: byType.stocks.length,
+        other: byType.other.length
+      }
+    },
+    subscribed,
+    available: {
+      forex: byType.forex,
+      crypto: byType.crypto,
+      indices: byType.indices,
+      commodities: byType.commodities,
+      stocks: byType.stocks,
+      other: byType.other
+    },
+    allSymbols: available
   });
 });
 
@@ -114,14 +156,53 @@ async function initialize() {
 
     // Initialize MetaAPI with price source account
     const metaApi = new MetaApiManager(priceSourceAccountId);
+    metaApiInstance = metaApi; // Store reference for /symbols endpoint
 
     // Connect to MetaAPI WebSocket
     logger.info('Connecting to MetaAPI...');
     await metaApi.connect();
     initializationState.metaApi = true;
 
-    // Subscribe to forex pairs
-    const pairs = process.env.TRADING_PAIRS?.split(',') || ALL_PAIRS;
+    // Auto-discover available symbols from broker
+    const availableSymbols = metaApi.getAvailableSymbols();
+    const symbolsByType = metaApi.getSymbolsByType();
+    
+    logger.info(`📊 Broker offers ${availableSymbols.length} symbols:`);
+    logger.info(`   Forex: ${symbolsByType.forex.length}, Crypto: ${symbolsByType.crypto.length}`);
+    logger.info(`   Indices: ${symbolsByType.indices.length}, Commodities: ${symbolsByType.commodities.length}`);
+    logger.info(`   Stocks: ${symbolsByType.stocks.length}, Other: ${symbolsByType.other.length}`);
+
+    // Determine which symbols to subscribe to:
+    // 1. If TRADING_PAIRS env is set, use that (manual override)
+    // 2. Otherwise use auto-discovery with smart filtering
+    let pairs: string[];
+    
+    if (process.env.TRADING_PAIRS) {
+      // Manual override via environment variable
+      pairs = process.env.TRADING_PAIRS.split(',');
+      logger.info(`Using manual TRADING_PAIRS override: ${pairs.length} symbols`);
+    } else if (process.env.AUTO_DISCOVER_SYMBOLS === 'true') {
+      // Full auto-discovery - subscribe to ALL available symbols
+      pairs = availableSymbols;
+      logger.info(`Auto-discovery enabled: subscribing to ALL ${pairs.length} symbols`);
+    } else {
+      // Default: Use forex + crypto + commodities from auto-discovery, fallback to pairs.ts
+      const autoDiscoveredPairs = [
+        ...symbolsByType.forex,
+        ...symbolsByType.crypto,
+        ...symbolsByType.commodities
+      ];
+      
+      if (autoDiscoveredPairs.length > 0) {
+        pairs = autoDiscoveredPairs;
+        logger.info(`Auto-discovered ${pairs.length} tradeable pairs (forex + crypto + commodities)`);
+      } else {
+        // Fallback to hardcoded pairs if auto-discovery returns empty
+        pairs = ALL_PAIRS;
+        logger.warn(`Auto-discovery returned empty, falling back to hardcoded ${pairs.length} pairs`);
+      }
+    }
+
     logger.info(`Subscribing to ${pairs.length} pairs...`);
     await metaApi.subscribeToSymbols(pairs);
     initializationState.subscribedPairs = pairs.length;
