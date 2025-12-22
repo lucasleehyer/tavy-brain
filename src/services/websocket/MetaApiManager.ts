@@ -272,6 +272,68 @@ export class MetaApiManager extends EventEmitter {
     return this.subscribedSymbols;
   }
 
+  /**
+   * Get all available symbols from the broker's terminal state
+   * This reads from terminalState.specifications after synchronization
+   */
+  getAvailableSymbols(): string[] {
+    const specifications = this.connection?.terminalState?.specifications || [];
+    return specifications.map((spec: any) => spec.symbol);
+  }
+
+  /**
+   * Get full symbol specifications with details like pip size, trade mode, etc.
+   */
+  getSymbolSpecifications(): any[] {
+    return this.connection?.terminalState?.specifications || [];
+  }
+
+  /**
+   * Get symbols filtered by calculation mode (forex, crypto, cfd, etc.)
+   */
+  getSymbolsByType(): {
+    forex: string[];
+    crypto: string[];
+    indices: string[];
+    commodities: string[];
+    stocks: string[];
+    other: string[];
+  } {
+    const specs = this.getSymbolSpecifications();
+    
+    const result = {
+      forex: [] as string[],
+      crypto: [] as string[],
+      indices: [] as string[],
+      commodities: [] as string[],
+      stocks: [] as string[],
+      other: [] as string[]
+    };
+
+    for (const spec of specs) {
+      const symbol = spec.symbol;
+      const calcMode = spec.profitCalculationMode || spec.priceCalculationMode || '';
+      const path = (spec.path || '').toLowerCase();
+      
+      // Categorize based on path or calculation mode
+      if (path.includes('forex') || path.includes('currencies')) {
+        result.forex.push(symbol);
+      } else if (path.includes('crypto') || symbol.includes('BTC') || symbol.includes('ETH') || symbol.includes('USD') && (symbol.includes('SOL') || symbol.includes('XRP') || symbol.includes('LTC'))) {
+        result.crypto.push(symbol);
+      } else if (path.includes('indices') || path.includes('index') || symbol.includes('US30') || symbol.includes('NAS') || symbol.includes('SPX')) {
+        result.indices.push(symbol);
+      } else if (path.includes('commodities') || path.includes('metals') || path.includes('energies') || symbol.includes('XAU') || symbol.includes('XAG') || symbol.includes('OIL')) {
+        result.commodities.push(symbol);
+      } else if (path.includes('stocks') || path.includes('shares')) {
+        result.stocks.push(symbol);
+      } else {
+        result.other.push(symbol);
+      }
+    }
+
+    return result;
+  }
+
   async disconnect(): Promise<void> {
     if (this.connection) {
       try {
