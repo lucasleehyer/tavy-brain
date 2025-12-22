@@ -97,3 +97,9 @@ export class SupabaseManager {
       .subscribe();
   }
 }
+
+// Convenience export for consumers
+export const supabase = SupabaseManager.getInstance().getClient();
+
+// Re-export SupabaseClient type for consumers
+export { SupabaseClient } from '@supabase/supabase-js';
