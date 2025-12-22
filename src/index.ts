@@ -8,7 +8,7 @@ import { SettingsRepository } from './services/database/SettingsRepository';
 import { AlertManager } from './services/notifications/AlertManager';
 import { ThresholdOptimizer } from './services/ai/ThresholdOptimizer';
 import { logger } from './utils/logger';
-import { ALL_PAIRS, FOREX_PAIRS } from './config/pairs';
+import { ALL_PAIRS } from './config/pairs';
 
 // Track initialization state
 let initializationState = {
@@ -162,6 +162,9 @@ async function initialize() {
     logger.info('Connecting to MetaAPI...');
     await metaApi.connect();
     initializationState.metaApi = true;
+
+    // Wait for broker to send symbol specifications (up to 30 seconds)
+    const specsCount = await metaApi.waitForSpecifications(30000);
 
     // Auto-discover available symbols from broker
     const availableSymbols = metaApi.getAvailableSymbols();
