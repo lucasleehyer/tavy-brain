@@ -159,10 +159,11 @@ export class CryptoPreFilter {
       score += 0.3; // Extreme = potential reversal
     }
 
-    // MACD momentum
-    if (Math.abs(indicators.macd.histogram) > 0) {
-      const histStrength = Math.min(Math.abs(indicators.macd.histogram) * 1000, 0.3);
-      score += histStrength;
+    // Momentum indicator (replaces MACD which isn't calculated)
+    if (indicators.momentum !== 0) {
+      // Normalize momentum - larger moves = more strength
+      const momStrength = Math.min(Math.abs(indicators.momentum) * 100, 0.3);
+      score += momStrength;
     }
 
     // ADX trend strength
