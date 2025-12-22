@@ -33,16 +33,19 @@ export const FOREX_PAIRS = [
   'XAGUSD'
 ];
 
-// Crypto CFD pairs - 24/7 trading
+// Crypto CFD pairs - 24/7 trading (FBS exact symbol names)
 export const CRYPTO_PAIRS = [
   'BTCUSD',
+  'BCHUSD',
   'ETHUSD',
-  'SOLUSD',
-  'XRPUSD',
   'LTCUSD',
-  'ADAUSD',
-  'DOTUSD',
-  'LINKUSD'
+  'XRPUSD',
+  'TONUSD',
+  'SOLUSD',
+  'TRXUSD',
+  'DOGUSD',
+  'BTCETH',
+  'BTCXAU'
 ];
 
 // All tradeable pairs
