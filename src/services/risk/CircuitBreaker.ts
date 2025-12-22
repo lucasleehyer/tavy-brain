@@ -1,4 +1,4 @@
-import { SupabaseClient } from '../database/SupabaseClient';
+import { supabase } from '../database/SupabaseClient';
 import { logger } from '../../utils/logger';
 
 interface CircuitBreakerConfig {
@@ -37,7 +37,6 @@ const DEFAULT_CONFIG: CircuitBreakerConfig = {
 
 export class CircuitBreaker {
   private config: CircuitBreakerConfig;
-  private supabase: SupabaseClient;
   private accountStates: Map<string, AccountRiskState> = new Map();
   private lastLatencyCheck: number = 0;
   private systemLatency: number = 0;
@@ -46,7 +45,7 @@ export class CircuitBreaker {
 
   constructor(config: Partial<CircuitBreakerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
-    this.supabase = new SupabaseClient();
+    // Uses imported supabase singleton
   }
 
   async initialize(): Promise<void> {
@@ -57,7 +56,7 @@ export class CircuitBreaker {
 
   private async loadAccountStates(): Promise<void> {
     try {
-      const { data: accounts, error } = await this.supabase.client
+      const { data: accounts, error } = await supabase
         .from('trading_accounts')
         .select('id, consecutive_losses, is_frozen, freeze_reason, frozen_at')
         .eq('is_active', true);
@@ -88,7 +87,7 @@ export class CircuitBreaker {
     try {
       const today = new Date().toISOString().split('T')[0];
       
-      const { data: dailyPnl, error } = await this.supabase.client
+      const { data: dailyPnl, error } = await supabase
         .from('daily_account_pnl')
         .select('trading_account_id, starting_balance, realized_pnl')
         .eq('trade_date', today);
@@ -249,7 +248,7 @@ export class CircuitBreaker {
     logger.warn(`Circuit breaker TRIPPED for account ${accountId}: ${reason}`);
 
     try {
-      await this.supabase.client
+      await supabase
         .from('trading_accounts')
         .update({
           is_frozen: true,
@@ -259,7 +258,7 @@ export class CircuitBreaker {
         .eq('id', accountId);
 
       // Log to VPS activity
-      await this.supabase.client
+      await supabase
         .from('vps_activity_logs')
         .insert({
           activity_type: 'circuit_breaker_trip',
@@ -283,7 +282,7 @@ export class CircuitBreaker {
     logger.info(`Circuit breaker RESET for account ${accountId}`);
 
     try {
-      await this.supabase.client
+      await supabase
         .from('trading_accounts')
         .update({
           is_frozen: false,
@@ -299,7 +298,7 @@ export class CircuitBreaker {
 
   private async updateAccountInDatabase(accountId: string, state: AccountRiskState): Promise<void> {
     try {
-      await this.supabase.client
+      await supabase
         .from('trading_accounts')
         .update({
           consecutive_losses: state.consecutiveLosses

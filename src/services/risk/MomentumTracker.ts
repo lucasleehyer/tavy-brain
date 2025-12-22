@@ -218,7 +218,7 @@ export class MomentumTracker {
       if (todayTrades && todayTrades.length > 0) {
         // Calculate daily PnL
         this.state.dailyPnlPercent = todayTrades.reduce(
-          (sum, t) => sum + (t.pnl_percent || 0), 
+          (sum: number, t: any) => sum + (t.pnl_percent || 0), 
           0
         );
 

@@ -177,15 +177,15 @@ export class KellyCalculator {
         return this.getDefaultStats();
       }
 
-      const wins = data.filter(t => t.outcome === 'win');
-      const losses = data.filter(t => t.outcome === 'loss');
+      const wins = data.filter((t: any) => t.outcome === 'win');
+      const losses = data.filter((t: any) => t.outcome === 'loss');
 
       const avgWinPercent = wins.length > 0
-        ? wins.reduce((sum, t) => sum + (t.pnl_percent || 0), 0) / wins.length
+        ? wins.reduce((sum: number, t: any) => sum + (t.pnl_percent || 0), 0) / wins.length
         : 2; // Default 2% win
 
       const avgLossPercent = losses.length > 0
-        ? losses.reduce((sum, t) => sum + (t.pnl_percent || 0), 0) / losses.length
+        ? losses.reduce((sum: number, t: any) => sum + (t.pnl_percent || 0), 0) / losses.length
         : -1; // Default 1% loss
 
       const stats: TradeStats = {
