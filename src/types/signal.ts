@@ -61,6 +61,11 @@ export interface TechnicalOutput {
   reasoning: string;
 }
 
+export interface PriceTarget {
+  price: number;
+  probability: number;
+}
+
 export interface PredictorOutput {
   predictedDirection: 'up' | 'down' | 'sideways';
   predictedMove: number;
@@ -68,6 +73,16 @@ export interface PredictorOutput {
   timeframe: string;
   supportLevels: number[];
   resistanceLevels: number[];
+  // Bold Contest-Winning Forecasts
+  priceTargets?: {
+    hours24: PriceTarget;
+    days3: PriceTarget;
+    days7: PriceTarget;
+  };
+  maxDownside?: number;
+  trendStrength?: 'weak' | 'moderate' | 'strong' | 'explosive';
+  recommendation?: string; // "Go all-in" / "Scale in" / "Wait" / "Take profits"
+  confluenceScore?: number; // 0-100 how aligned all timeframes are
 }
 
 export interface SignalDecision {
