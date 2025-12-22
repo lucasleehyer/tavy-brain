@@ -144,7 +144,9 @@ export class MetaApiManager extends EventEmitter {
       onSynchronizationStarted: () => {},
       onAccountInformationUpdated: () => {},
       onSymbolSpecificationUpdated: () => {},
-      onSymbolSpecificationsUpdated: () => {},
+      onSymbolSpecificationsUpdated: (instanceIndex: string, specifications: any[]) => {
+        logger.info(`📋 Received ${specifications?.length || 0} symbol specifications from broker`);
+      },
       onDealAdded: () => {},
       onDealSynchronizationFinished: () => {},
       onOrderAdded: () => {},
@@ -154,6 +156,32 @@ export class MetaApiManager extends EventEmitter {
       onPositionsSynchronized: () => {},
       onPendingOrdersSynchronized: () => {},
     });
+  }
+
+  /**
+   * Wait for broker to send symbol specifications (up to maxWaitMs)
+   * Returns the number of specifications received
+   */
+  async waitForSpecifications(maxWaitMs: number = 30000): Promise<number> {
+    const startTime = Date.now();
+    logger.info(`⏳ Waiting for symbol specifications (max ${maxWaitMs / 1000}s)...`);
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      const specs = this.getAvailableSymbols();
+      if (specs.length > 0) {
+        const elapsed = Date.now() - startTime;
+        logger.info(`✅ Received ${specs.length} symbol specifications after ${elapsed}ms`);
+        return specs.length;
+      }
+      await delay(1000);
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      if (elapsed % 5 === 0 && elapsed > 0) {
+        logger.info(`Still waiting for specifications... ${elapsed}s`);
+      }
+    }
+    
+    logger.warn(`⚠️ Timed out waiting for specifications after ${maxWaitMs}ms`);
+    return 0;
   }
 
   async subscribeToSymbols(symbols: string[]): Promise<void> {
@@ -289,7 +317,8 @@ export class MetaApiManager extends EventEmitter {
   }
 
   /**
-   * Get symbols filtered by calculation mode (forex, crypto, cfd, etc.)
+   * Get symbols filtered by type using symbol naming patterns
+   * Enhanced to work with brokers like FBS that may not populate spec.path
    */
   getSymbolsByType(): {
     forex: string[];
@@ -310,25 +339,85 @@ export class MetaApiManager extends EventEmitter {
       other: [] as string[]
     };
 
+    // Common currency codes for forex detection
+    const forexCurrencies = ['EUR', 'USD', 'GBP', 'JPY', 'CHF', 'AUD', 'NZD', 'CAD', 'SEK', 'NOK', 'DKK', 'SGD', 'HKD', 'ZAR', 'MXN', 'TRY', 'PLN', 'HUF', 'CZK'];
+    
+    // Crypto symbols
+    const cryptoSymbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'EOS', 'XLM', 'ADA', 'DOT', 'LINK', 'UNI', 'DOGE', 'SOL', 'AVAX', 'MATIC', 'SHIB', 'ATOM', 'FTM', 'NEAR', 'APE'];
+    
+    // Index symbols
+    const indexPatterns = ['US30', 'US500', 'US100', 'NAS100', 'SPX', 'NDX', 'DJI', 'DAX', 'FTSE', 'CAC', 'STOXX', 'NIKKEI', 'N225', 'HSI', 'ASX', 'UK100', 'DE30', 'DE40', 'FR40', 'JP225', 'AU200', 'ES35', 'EU50'];
+    
+    // Commodity symbols
+    const commodityPatterns = ['XAU', 'XAG', 'GOLD', 'SILVER', 'OIL', 'WTI', 'BRENT', 'USOIL', 'UKOIL', 'NGAS', 'COPPER', 'PLAT', 'PALL'];
+
     for (const spec of specs) {
-      const symbol = spec.symbol;
-      const calcMode = spec.profitCalculationMode || spec.priceCalculationMode || '';
+      const symbol = spec.symbol.toUpperCase();
       const path = (spec.path || '').toLowerCase();
       
-      // Categorize based on path or calculation mode
-      if (path.includes('forex') || path.includes('currencies')) {
-        result.forex.push(symbol);
-      } else if (path.includes('crypto') || symbol.includes('BTC') || symbol.includes('ETH') || symbol.includes('USD') && (symbol.includes('SOL') || symbol.includes('XRP') || symbol.includes('LTC'))) {
-        result.crypto.push(symbol);
-      } else if (path.includes('indices') || path.includes('index') || symbol.includes('US30') || symbol.includes('NAS') || symbol.includes('SPX')) {
-        result.indices.push(symbol);
-      } else if (path.includes('commodities') || path.includes('metals') || path.includes('energies') || symbol.includes('XAU') || symbol.includes('XAG') || symbol.includes('OIL')) {
-        result.commodities.push(symbol);
-      } else if (path.includes('stocks') || path.includes('shares')) {
-        result.stocks.push(symbol);
-      } else {
-        result.other.push(symbol);
+      // 1. First check path if available (most reliable)
+      if (path.includes('forex') || path.includes('currencies') || path.includes('majors') || path.includes('minors') || path.includes('exotics')) {
+        result.forex.push(spec.symbol);
+        continue;
       }
+      
+      if (path.includes('crypto') || path.includes('coin')) {
+        result.crypto.push(spec.symbol);
+        continue;
+      }
+      
+      if (path.includes('indices') || path.includes('index')) {
+        result.indices.push(spec.symbol);
+        continue;
+      }
+      
+      if (path.includes('commodities') || path.includes('metals') || path.includes('energies') || path.includes('energy')) {
+        result.commodities.push(spec.symbol);
+        continue;
+      }
+      
+      if (path.includes('stocks') || path.includes('shares') || path.includes('equities')) {
+        result.stocks.push(spec.symbol);
+        continue;
+      }
+      
+      // 2. Fallback to symbol name pattern matching
+      // Check for forex pairs (6 chars like EURUSD, or with suffix like EURUSDm)
+      const baseSymbol = symbol.replace(/[.#_\-m]/gi, ''); // Remove common suffixes
+      const isForex = forexCurrencies.some(c1 => 
+        forexCurrencies.some(c2 => 
+          c1 !== c2 && (baseSymbol.startsWith(c1 + c2) || baseSymbol === c1 + c2)
+        )
+      );
+      
+      if (isForex) {
+        result.forex.push(spec.symbol);
+        continue;
+      }
+      
+      // Check for crypto
+      const isCrypto = cryptoSymbols.some(c => symbol.includes(c));
+      if (isCrypto) {
+        result.crypto.push(spec.symbol);
+        continue;
+      }
+      
+      // Check for indices
+      const isIndex = indexPatterns.some(p => symbol.includes(p));
+      if (isIndex) {
+        result.indices.push(spec.symbol);
+        continue;
+      }
+      
+      // Check for commodities
+      const isCommodity = commodityPatterns.some(p => symbol.includes(p));
+      if (isCommodity) {
+        result.commodities.push(spec.symbol);
+        continue;
+      }
+      
+      // Everything else goes to other
+      result.other.push(spec.symbol);
     }
 
     return result;
