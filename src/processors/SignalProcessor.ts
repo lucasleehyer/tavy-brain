@@ -6,6 +6,7 @@ import { AICouncil } from '../services/ai/AICouncil';
 import { ExecutionRouter } from '../services/execution/ExecutionRouter';
 import { SignalRepository } from '../services/database/SignalRepository';
 import { SettingsRepository } from '../services/database/SettingsRepository';
+import { SupabaseManager } from '../services/database/SupabaseClient';
 import { KellyCalculator } from '../services/risk/KellyCalculator';
 import { MomentumTracker } from '../services/risk/MomentumTracker';
 import { DrawdownManager } from '../services/risk/DrawdownManager';
@@ -71,9 +72,10 @@ export class SignalProcessor {
     this.momentumTracker = new MomentumTracker();
     this.drawdownManager = new DrawdownManager();
 
-    // Initialize execution router with default risk (will be overridden from DB)
+    // Initialize execution router with authenticated user ID and default risk
+    const userId = SupabaseManager.getInstance().getUserId();
     this.executionRouter = new ExecutionRouter({
-      userId: 'system',
+      userId,
       defaultRiskPercent: 10 // Default, will be read from DB
     });
 
@@ -195,7 +197,6 @@ export class SignalProcessor {
 
       if (!preFilterResult.passed) {
         await this.signalRepo.logDecision({
-          userId: 'system',
           symbol,
           assetType,
           decision: 'REJECTED',
@@ -241,7 +242,6 @@ export class SignalProcessor {
 
       // Log the decision
       await this.signalRepo.logDecision({
-        userId: 'system',
         symbol,
         assetType,
         decision: decision.action,
@@ -292,9 +292,9 @@ export class SignalProcessor {
   ): Promise<void> {
     const assetType = getAssetType(symbol);
     
-    // Save signal first
+    // Save signal first (user ID handled internally by SignalRepository)
     const signalId = await this.signalRepo.saveSignal({
-      userId: 'system',
+      userId: SupabaseManager.getInstance().getUserId(),
       symbol,
       assetType,
       action: decision.action,
@@ -320,9 +320,10 @@ export class SignalProcessor {
     this.executionRouter.updateRiskPercent(riskPercent);
 
     // Execute trade (returns array of results for all accounts)
+    const userId = SupabaseManager.getInstance().getUserId();
     const results = await this.executionRouter.executeTrade({
       id: signalId,
-      userId: 'system',
+      userId,
       symbol,
       assetType,
       action: decision.action,
