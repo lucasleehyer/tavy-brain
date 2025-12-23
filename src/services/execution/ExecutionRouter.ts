@@ -346,7 +346,7 @@ export class ExecutionRouter {
       logger.info(`✅ ${account.account_name}: Trade executed - ${result.positionId} @ ${result.price}`);
       
       // Log success to activity feed
-      await activityLogger.logTrade(signal.symbol, account.account_name, signal.action);
+      await activityLogger.logTrade(signal.symbol, account.account_name, signal.action as 'BUY' | 'SELL');
 
       return {
         success: true,
