@@ -95,14 +95,61 @@ export class AlertManager {
     });
   }
 
-  async alertSignalFired(symbol: string, action: string, confidence: number, details?: string): Promise<void> {
-    logger.info(`[ALERT] Signal fired: ${action} ${symbol} at ${confidence}% confidence${details ? ` - ${details}` : ''}`);
+  async alertSignalFired(
+    symbol: string, 
+    action: string, 
+    confidence: number, 
+    entryPrice?: number,
+    stopLoss?: number,
+    takeProfit1?: number,
+    takeProfit2?: number,
+    takeProfit3?: number,
+    assetType?: string,
+    reasoning?: string
+  ): Promise<void> {
+    logger.info(`[ALERT] Signal fired: ${action} ${symbol} at ${confidence}% confidence`);
     await this.sendToSupabase({
       type: 'signal_fired',
       symbol,
       action,
       confidence,
-      details,
+      entryPrice,
+      stopLoss,
+      takeProfit1,
+      takeProfit2,
+      takeProfit3,
+      assetType: assetType || 'forex',
+      reasoning,
+    });
+  }
+
+  async alertTradeExecuted(
+    symbol: string,
+    action: 'BUY' | 'SELL',
+    confidence: number,
+    entryPrice: number,
+    lotSize: number,
+    accountName: string,
+    broker?: string,
+    positionId?: string,
+    stopLoss?: number,
+    takeProfit?: number,
+    assetType?: string
+  ): Promise<void> {
+    logger.info(`[ALERT] Trade executed: ${action} ${symbol} @ ${entryPrice} on ${accountName}`);
+    await this.sendToSupabase({
+      type: 'trade_executed',
+      symbol,
+      action,
+      confidence,
+      entryPrice,
+      lotSize,
+      accountName,
+      broker,
+      positionId,
+      stopLoss,
+      takeProfit,
+      assetType: assetType || 'forex',
     });
   }
 
