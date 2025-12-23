@@ -5,7 +5,7 @@ import { Trade } from '../../types/trade';
 export class TradeRepository {
   private supabase = SupabaseManager.getInstance().getClient();
 
-  async saveTrade(trade: Trade): Promise<string | null> {
+  async saveTrade(trade: Trade & { lastExecutionError?: string }): Promise<string | null> {
     try {
       const { data, error } = await this.supabase
         .from('trades')
@@ -22,16 +22,21 @@ export class TradeRepository {
           mt_position_id: trade.mtPositionId,
           execution_status: trade.executionStatus,
           execution_attempts: trade.executionAttempts,
+          last_execution_error: trade.lastExecutionError || null,
           snapshot_settings: trade.snapshotSettings,
-          status: 'open',
-          opened_at: new Date().toISOString()
+          status: trade.status || 'open',
+          opened_at: new Date().toISOString(),
+          signal_action: trade.direction?.toUpperCase(),
+          signal_confidence: trade.snapshotSettings?.confidence || null,
+          is_paper_trade: false,
+          asset_type: trade.snapshotSettings?.assetType || 'forex'
         })
         .select('id')
         .single();
 
       if (error) throw error;
 
-      logger.info(`Trade saved: ${data.id}`);
+      logger.info(`Trade saved: ${data.id} - ${trade.symbol} ${trade.direction} (${trade.executionStatus})`);
       return data.id;
 
     } catch (error) {
