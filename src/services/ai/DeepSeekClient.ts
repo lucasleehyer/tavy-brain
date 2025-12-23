@@ -26,7 +26,7 @@ export class DeepSeekClient {
   async chat(
     messages: DeepSeekMessage[],
     options: {
-      model?: 'deepseek-chat' | 'deepseek-reasoner';
+      model?: 'deepseek-chat' | 'deepseek-reasoner' | 'deepseek-speciale';
       temperature?: number;
       maxTokens?: number;
     } = {}
@@ -37,7 +37,16 @@ export class DeepSeekClient {
       maxTokens = 2048
     } = options;
 
+    // V3.2-Speciale endpoint expired Dec 15, 2025 - fallback to deepseek-reasoner (V3.2 Thinking Mode)
+    const isSpeciale = model === 'deepseek-speciale';
+    if (isSpeciale) {
+      logger.warn('DeepSeek V3.2-Speciale endpoint expired Dec 15, 2025 - using deepseek-reasoner (V3.2 Thinking Mode)');
+    }
+    const actualModel = isSpeciale ? 'deepseek-reasoner' : model;
+
     try {
+      logger.debug(`Using DeepSeek ${actualModel}${isSpeciale ? ' (fallback from Speciale)' : ''}`);
+      
       const response = await fetch(this.apiUrl, {
         method: 'POST',
         headers: {
@@ -45,7 +54,7 @@ export class DeepSeekClient {
           'Authorization': `Bearer ${this.apiKey}`
         },
         body: JSON.stringify({
-          model,
+          model: actualModel,
           messages,
           temperature,
           max_tokens: maxTokens,
@@ -94,13 +103,13 @@ export class DeepSeekClient {
     }
   }
 
-  // Estimate cost based on DeepSeek V3.2 pricing
-  // deepseek-chat: $0.28/1M input, $1.10/1M output (cache miss)
-  // deepseek-reasoner: $0.55/1M input, $2.19/1M output
-  estimateCost(tokensUsed: { prompt: number; completion: number }, model: 'deepseek-chat' | 'deepseek-reasoner'): number {
-    const pricing = model === 'deepseek-chat' 
-      ? { input: 0.28 / 1_000_000, output: 1.10 / 1_000_000 }
-      : { input: 0.55 / 1_000_000, output: 2.19 / 1_000_000 };
+  // Estimate cost based on DeepSeek V3.2 pricing (updated Dec 2024)
+  // deepseek-chat: $0.28/1M input (cache miss), $0.42/1M output
+  // deepseek-reasoner: $0.28/1M input, $0.42/1M output (same as chat for V3.2)
+  // deepseek-speciale: Same pricing as V3.2
+  estimateCost(tokensUsed: { prompt: number; completion: number }, model: 'deepseek-chat' | 'deepseek-reasoner' | 'deepseek-speciale'): number {
+    // V3.2 unified pricing: $0.28/1M input, $0.42/1M output
+    const pricing = { input: 0.28 / 1_000_000, output: 0.42 / 1_000_000 };
     
     return (tokensUsed.prompt * pricing.input) + (tokensUsed.completion * pricing.output);
   }
