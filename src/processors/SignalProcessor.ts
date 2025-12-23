@@ -10,6 +10,7 @@ import { SupabaseManager } from '../services/database/SupabaseClient';
 import { KellyCalculator } from '../services/risk/KellyCalculator';
 import { MomentumTracker } from '../services/risk/MomentumTracker';
 import { DrawdownManager } from '../services/risk/DrawdownManager';
+import { AlertManager } from '../services/notifications/AlertManager';
 import { activityLogger } from '../services/database/ActivityLogger';
 import { logger } from '../utils/logger';
 import { Tick, Candle } from '../types/market';
@@ -45,6 +46,7 @@ export class SignalProcessor {
   private kellyCalculator: KellyCalculator;
   private momentumTracker: MomentumTracker;
   private drawdownManager: DrawdownManager;
+  private alertManager: AlertManager;
   private settings: TradingThresholds;
   private state: ProcessingState;
   private isRunning: boolean = true;
@@ -71,6 +73,7 @@ export class SignalProcessor {
     this.kellyCalculator = new KellyCalculator({ kellyFraction: 0.5, maxRiskPercent: 5 });
     this.momentumTracker = new MomentumTracker();
     this.drawdownManager = new DrawdownManager();
+    this.alertManager = new AlertManager();
 
     // Initialize execution router with authenticated user ID and default risk
     const userId = SupabaseManager.getInstance().getUserId();
@@ -258,6 +261,21 @@ export class SignalProcessor {
       // Execute if not HOLD and meets confidence threshold (now 70%)
       if (decision.action !== 'HOLD' && decision.confidence >= this.settings.minConfidence) {
         await activityLogger.logSignal(symbol, decision.action, decision.confidence);
+        
+        // Send signal fired email notification with full details
+        await this.alertManager.alertSignalFired(
+          symbol,
+          decision.action,
+          decision.confidence,
+          decision.entryPrice,
+          decision.stopLoss,
+          decision.takeProfit1,
+          decision.takeProfit2,
+          decision.takeProfit3,
+          assetType,
+          decision.reasoning
+        );
+        
         await this.executeSignal(symbol, decision, accountInfo.balance, riskPercent);
       }
 
