@@ -348,6 +348,21 @@ export class ExecutionRouter {
       // Log success to activity feed
       await activityLogger.logTrade(signal.symbol, account.account_name, signal.action as 'BUY' | 'SELL');
 
+      // Send email notification for trade execution
+      await this.alertManager.alertTradeExecuted(
+        signal.symbol,
+        signal.action as 'BUY' | 'SELL',
+        signal.confidence,
+        result.price || signal.entryPrice,
+        lotSize,
+        account.account_name,
+        account.broker,
+        result.positionId,
+        signal.stopLoss,
+        signal.takeProfit1,
+        signal.assetType
+      );
+
       return {
         success: true,
         positionId: result.positionId,
