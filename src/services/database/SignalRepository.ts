@@ -3,14 +3,16 @@ import { logger } from '../../utils/logger';
 import { Signal, SignalOutcome } from '../../types/signal';
 
 export class SignalRepository {
-  private supabase = SupabaseManager.getInstance().getClient();
+  private supabaseManager = SupabaseManager.getInstance();
+  private supabase = this.supabaseManager.getClient();
 
   async saveSignal(signal: Signal): Promise<string | null> {
     try {
+      const userId = this.supabaseManager.getUserId();
       const { data, error } = await this.supabase
         .from('signal_history')
         .insert({
-          user_id: signal.userId,
+          user_id: userId,
           symbol: signal.symbol,
           asset_type: signal.assetType,
           action: signal.action,
@@ -93,7 +95,6 @@ export class SignalRepository {
   }
 
   async logDecision(decision: {
-    userId: string;
     symbol: string;
     assetType: string;
     decision: string;
@@ -104,8 +105,9 @@ export class SignalRepository {
     rejectionReason?: string;
   }): Promise<void> {
     try {
+      const userId = this.supabaseManager.getUserId();
       await this.supabase.from('ai_decision_log').insert({
-        user_id: decision.userId,
+        user_id: userId,
         symbol: decision.symbol,
         asset_type: decision.assetType,
         decision: decision.decision,
