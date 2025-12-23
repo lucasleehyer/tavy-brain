@@ -3,6 +3,7 @@ import { TradeRepository } from '../database/TradeRepository';
 import { SettingsRepository } from '../database/SettingsRepository';
 import { AlertManager } from '../notifications/AlertManager';
 import { CircuitBreaker } from '../risk/CircuitBreaker';
+import { activityLogger } from '../database/ActivityLogger';
 import { logger } from '../../utils/logger';
 import { Signal } from '../../types/signal';
 import { ExecutionResult } from '../../types/trade';
@@ -196,16 +197,82 @@ export class ExecutionRouter {
         this.accountConnections.set(account.metaapi_account_id, metaApi);
       }
 
+      // CHECK SYMBOL AVAILABILITY - Critical for multi-broker support
+      const availableSymbols = metaApi.getAvailableSymbols();
+      if (availableSymbols.length > 0 && !availableSymbols.includes(signal.symbol)) {
+        // Try to find a similar symbol (e.g., XAUUSD vs GOLD, EURUSDm vs EURUSD)
+        const normalizedSignal = signal.symbol.replace(/[.#_\-m]/gi, '').toUpperCase();
+        const matchingSymbol = availableSymbols.find(s => {
+          const normalized = s.replace(/[.#_\-m]/gi, '').toUpperCase();
+          return normalized === normalizedSignal;
+        });
+
+        if (matchingSymbol) {
+          logger.info(`Symbol mapping: ${signal.symbol} -> ${matchingSymbol} on ${account.broker}`);
+          // Update signal symbol for this execution (don't modify original)
+          signal = { ...signal, symbol: matchingSymbol };
+        } else {
+          const errorMsg = `Symbol ${signal.symbol} not available on ${account.broker}`;
+          logger.error(`❌ ${account.account_name}: ${errorMsg}`);
+          
+          // Log to activity feed so it's visible in dashboard
+          await activityLogger.logError(`Broker ${account.broker} does not have ${signal.symbol}`, {
+            accountName: account.account_name,
+            broker: account.broker,
+            symbol: signal.symbol,
+            availableCount: availableSymbols.length,
+            searchedFor: normalizedSignal
+          });
+
+          // Save failed trade attempt to database for complete history
+          await this.tradeRepo.saveTrade({
+            userId: this.config.userId,
+            symbol: signal.symbol,
+            direction: signal.action.toLowerCase() as 'buy' | 'sell',
+            entryPrice: signal.entryPrice,
+            quantity: 0, // No lot size since we couldn't execute
+            stopLoss: signal.stopLoss,
+            takeProfit: signal.takeProfit1,
+            tradingAccountId: account.id,
+            signalId: signal.id,
+            mtPositionId: undefined,
+            executionStatus: 'failed',
+            executionAttempts: 1,
+            lastExecutionError: errorMsg,
+            snapshotSettings: signal.snapshotSettings,
+            status: 'cancelled',
+            openedAt: new Date()
+          });
+
+          await this.alertManager.alertTradeFailure(signal.symbol, errorMsg);
+
+          return {
+            success: false,
+            error: errorMsg,
+            accountId: account.id,
+            accountName: account.account_name
+          };
+        }
+      }
+
       // Get account balance
       const accountInfo = await metaApi.getAccountInfo();
       const balance = accountInfo.balance;
 
       // Check minimum balance
       if (balance < account.minimum_balance) {
-        logger.warn(`Skipping ${account.account_name}: balance $${balance} below minimum $${account.minimum_balance}`);
+        const errorMsg = `Balance $${balance.toFixed(2)} below minimum $${account.minimum_balance}`;
+        logger.warn(`Skipping ${account.account_name}: ${errorMsg}`);
+        
+        await activityLogger.logError(`Insufficient balance on ${account.account_name}`, {
+          balance,
+          minimumBalance: account.minimum_balance,
+          symbol: signal.symbol
+        });
+
         return {
           success: false,
-          error: `Balance $${balance} below minimum $${account.minimum_balance}`,
+          error: errorMsg,
           accountId: account.id,
           accountName: account.account_name
         };
@@ -252,10 +319,12 @@ export class ExecutionRouter {
         ...signal.snapshotSettings,
         riskPercent,
         positionTier: this.getPositionTier(signal.confidence),
-        dynamicSizing: true
+        dynamicSizing: true,
+        executedOnBroker: account.broker,
+        executedSymbol: signal.symbol
       };
 
-      // Save trade to database
+      // Save trade to database with full details
       await this.tradeRepo.saveTrade({
         userId: this.config.userId,
         symbol: signal.symbol,
@@ -274,7 +343,10 @@ export class ExecutionRouter {
         openedAt: new Date()
       });
 
-      logger.info(`✅ ${account.account_name}: Trade executed - ${result.positionId}`);
+      logger.info(`✅ ${account.account_name}: Trade executed - ${result.positionId} @ ${result.price}`);
+      
+      // Log success to activity feed
+      await activityLogger.logTrade(signal.symbol, account.account_name, signal.action);
 
       return {
         success: true,
@@ -287,6 +359,34 @@ export class ExecutionRouter {
     } catch (error) {
       const errorMessage = (error as Error).message;
       logger.error(`❌ ${account.account_name}: Execution failed - ${errorMessage}`);
+
+      // Log execution failure
+      await activityLogger.logError(`Trade execution failed on ${account.account_name}`, {
+        symbol: signal.symbol,
+        action: signal.action,
+        error: errorMessage,
+        broker: account.broker
+      });
+
+      // Save failed trade attempt to database
+      await this.tradeRepo.saveTrade({
+        userId: this.config.userId,
+        symbol: signal.symbol,
+        direction: signal.action.toLowerCase() as 'buy' | 'sell',
+        entryPrice: signal.entryPrice,
+        quantity: 0,
+        stopLoss: signal.stopLoss,
+        takeProfit: signal.takeProfit1,
+        tradingAccountId: account.id,
+        signalId: signal.id,
+        mtPositionId: undefined,
+        executionStatus: 'failed',
+        executionAttempts: 1,
+        lastExecutionError: errorMessage,
+        snapshotSettings: signal.snapshotSettings,
+        status: 'cancelled',
+        openedAt: new Date()
+      });
 
       await this.alertManager.alertTradeFailure(
         signal.symbol,
