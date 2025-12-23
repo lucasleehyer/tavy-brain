@@ -90,18 +90,19 @@ export class MasterOrchestrator {
       }
     }
     
-    // Use deepseek-reasoner for critical trading decisions (thinking mode)
+    // Use deepseek-speciale for critical trading decisions (V3.2-Speciale: maxed-out reasoning)
+    // V3.2-Speciale rivals Gemini-3.0-Pro and achieves gold-level results in IMO/CMO/ICPC
     const response = await client.chat(
       [
         { role: 'system', content: this.getSystemPrompt(input.assetType, aggressiveMode, isExplosiveTrend) },
         { role: 'user', content: this.getUserPrompt(input, aggressiveMode, isExplosiveTrend) }
       ],
-      { model: 'deepseek-reasoner', temperature: 0.2, maxTokens: 4096 }
+      { model: 'deepseek-speciale', temperature: 0.2, maxTokens: 4096 }
     );
 
     // Log the reasoning process if available
     if (response.reasoningContent) {
-      logger.debug('DeepSeek Reasoner thinking:', response.reasoningContent.slice(0, 500));
+      logger.debug('DeepSeek V3.2-Speciale reasoning:', response.reasoningContent.slice(0, 500));
     }
 
     return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus, explosiveBonus);
