@@ -278,6 +278,67 @@ export class ExecutionRouter {
         };
       }
 
+      // Get max lot size settings from database (cached in settings)
+      const settings = await this.settingsRepo.getSettings();
+      const maxLotSize = settings?.max_lot_size || 0.5;
+      const maxLotSizeGold = settings?.max_lot_size_gold || 0.1;
+      const maxConcurrentPositions = settings?.max_concurrent_positions || 3;
+
+      // Check concurrent position limit
+      const openTrades = await this.tradeRepo.getOpenTrades();
+      const accountOpenTrades = openTrades.filter(t => t.trading_account_id === account.id);
+      
+      if (accountOpenTrades.length >= maxConcurrentPositions) {
+        const errorMsg = `Max concurrent positions reached (${accountOpenTrades.length}/${maxConcurrentPositions})`;
+        logger.warn(`Skipping ${account.account_name}: ${errorMsg}`);
+        
+        await activityLogger.logInfo(`Position limit reached on ${account.account_name}`, {
+          openPositions: accountOpenTrades.length,
+          maxPositions: maxConcurrentPositions,
+          symbol: signal.symbol
+        });
+
+        return {
+          success: false,
+          error: errorMsg,
+          accountId: account.id,
+          accountName: account.account_name
+        };
+      }
+
+      // DUPLICATE TRADE PREVENTION: Check if symbol already has open position on broker
+      try {
+        const brokerPositions = await metaApi.getPositions();
+        const normalizedSignalSymbol = signal.symbol.replace(/[.#_\-m]/gi, '').toUpperCase();
+        
+        const existingPosition = brokerPositions.find((p: any) => {
+          const normalizedPosSymbol = (p.symbol || '').replace(/[.#_\-m]/gi, '').toUpperCase();
+          return normalizedPosSymbol === normalizedSignalSymbol;
+        });
+
+        if (existingPosition) {
+          const errorMsg = `Already has open position for ${signal.symbol} (position ${existingPosition.id})`;
+          logger.warn(`⚠️ ${account.account_name}: ${errorMsg}`);
+          
+          await activityLogger.logInfo(`Skipped duplicate trade on ${account.account_name}`, {
+            symbol: signal.symbol,
+            existingPositionId: existingPosition.id,
+            existingDirection: existingPosition.type,
+            existingVolume: existingPosition.volume
+          });
+
+          return {
+            success: false,
+            error: errorMsg,
+            accountId: account.id,
+            accountName: account.account_name
+          };
+        }
+      } catch (posCheckError) {
+        logger.warn(`Could not check existing positions on ${account.account_name}:`, posCheckError);
+        // Continue with trade - we'll rely on broker rejection if duplicate exists
+      }
+
       // Calculate lot size based on asset type
       let lotSize: number;
       
@@ -303,6 +364,36 @@ export class ExecutionRouter {
         );
         logger.info(`${account.account_name} [FOREX]: Balance $${balance}, Risk ${riskPercent}%, Lot size: ${lotSize}`);
       }
+
+      // CRITICAL: Apply maximum lot size cap
+      const isGold = signal.symbol.includes('XAU') || signal.symbol.includes('GOLD');
+      const isSilver = signal.symbol.includes('XAG') || signal.symbol.includes('SILVER');
+      const effectiveMaxLot = (isGold || isSilver) ? maxLotSizeGold : maxLotSize;
+      
+      if (lotSize > effectiveMaxLot) {
+        logger.warn(`${account.account_name}: Lot size ${lotSize} capped to max ${effectiveMaxLot}`);
+        await activityLogger.logInfo(`Lot size capped on ${account.account_name}`, {
+          calculatedLot: lotSize,
+          maxLot: effectiveMaxLot,
+          symbol: signal.symbol,
+          isGold: isGold || isSilver
+        });
+        lotSize = effectiveMaxLot;
+      }
+
+      logger.info(`${account.account_name}: Final lot size = ${lotSize} (max: ${effectiveMaxLot})`);
+
+      // Calculate dollar risk for logging
+      const dollarRisk = balance * (riskPercent / 100);
+      await activityLogger.logInfo(`Trade sizing: ${signal.symbol} ${signal.action}`, {
+        accountName: account.account_name,
+        balance: balance.toFixed(2),
+        riskPercent: riskPercent.toFixed(2),
+        dollarRisk: dollarRisk.toFixed(2),
+        lotSize: lotSize,
+        stopLoss: signal.stopLoss,
+        takeProfit: signal.takeProfit1
+      });
 
       // Execute trade
       const result = await metaApi.openTrade({
