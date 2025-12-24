@@ -116,7 +116,7 @@ export class MasterOrchestrator {
       }
 
       // ========== PHASE 3: Get Regime Strategy ==========
-      const rsi = input.agentOutputs.technical?.indicators?.rsi || 50;
+      const rsi = input.indicators?.rsi || 50;
       const atKeyLevel = input.keyLevels?.atKeyLevel || false;
       const signalDirection: 'BUY' | 'SELL' = input.mtfTrend?.allowedDirection === 'short' ? 'SELL' : 'BUY';
       const regimeStrategy = this.regimeRouter.route(input.regime, signalDirection, rsi, atKeyLevel);
