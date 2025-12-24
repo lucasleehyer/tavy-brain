@@ -90,11 +90,28 @@ export class PositionMonitor {
             );
           }
 
-          // Alert
+          // Calculate hold duration
+          const openedAt = new Date(trade.opened_at);
+          const holdDurationMinutes = (Date.now() - openedAt.getTime()) / (1000 * 60);
+
+          // Calculate pips
+          const pipMultiplier = trade.symbol.includes('JPY') ? 100 : 10000;
+          const direction = trade.direction === 'buy' ? 1 : -1;
+          const pnlPips = (exitPrice - trade.entry_price) * direction * pipMultiplier;
+
+          // Alert with full details
           await this.alertManager.alertTradeClosed(
             trade.symbol,
             pnl.dollars,
-            pnl.dollars >= 0 ? 'win' : 'loss'
+            pnl.dollars >= 0 ? 'win' : 'loss',
+            trade.direction?.toUpperCase() as 'BUY' | 'SELL',
+            trade.entry_price,
+            exitPrice,
+            trade.quantity,
+            trade.account_name || undefined,
+            holdDurationMinutes,
+            pnlPips,
+            trade.asset_type || 'forex'
           );
         }
       }
@@ -165,10 +182,27 @@ export class PositionMonitor {
         );
       }
 
+      // Calculate hold duration
+      const openedAt = new Date(trade.opened_at);
+      const holdDurationMinutes = (Date.now() - openedAt.getTime()) / (1000 * 60);
+
+      // Calculate pips
+      const pipMultiplier = trade.symbol.includes('JPY') ? 100 : 10000;
+      const direction = trade.direction === 'buy' ? 1 : -1;
+      const pnlPips = (exitPrice - trade.entry_price) * direction * pipMultiplier;
+
       await this.alertManager.alertTradeClosed(
         trade.symbol,
         pnl.dollars,
-        pnl.dollars >= 0 ? 'win' : 'loss'
+        pnl.dollars >= 0 ? 'win' : 'loss',
+        trade.direction?.toUpperCase() as 'BUY' | 'SELL',
+        trade.entry_price,
+        exitPrice,
+        trade.quantity,
+        trade.account_name || undefined,
+        holdDurationMinutes,
+        pnlPips,
+        trade.asset_type || 'forex'
       );
 
     } catch (error) {
