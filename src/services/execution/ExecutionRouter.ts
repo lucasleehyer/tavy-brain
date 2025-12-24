@@ -162,6 +162,12 @@ export class ExecutionRouter {
       signal.symbol,
       signal.action,
       signal.confidence,
+      signal.entryPrice,
+      signal.stopLoss,
+      signal.takeProfit1,
+      signal.takeProfit2,
+      signal.takeProfit3,
+      'forex',
       `Executed on ${successCount}/${accounts.length} accounts (${dynamicRisk.tier} position, ${dynamicRisk.riskPercent.toFixed(2)}% risk)`
     );
 
