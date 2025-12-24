@@ -104,7 +104,7 @@ export class MasterOrchestrator {
     const client = this.getClient();
     if (!client) {
       logger.warn('DeepSeek API key not configured for MasterOrchestrator');
-      return this.getHoldDecision(input.currentPrice, 'DeepSeek API not configured');
+      return this.getHoldDecision(input.currentPrice, 'DeepSeek API not configured', input.agentOutputs);
     }
 
     try {
@@ -112,7 +112,7 @@ export class MasterOrchestrator {
       const drawdownResult = await this.drawdownController.getState();
       if (drawdownResult.state === 'STOPPED') {
         logger.warn(`[Orchestrator] ${input.symbol}: Trading STOPPED due to drawdown protection`);
-        return this.getHoldDecision(input.currentPrice, 'Trading stopped - drawdown protection active');
+        return this.getHoldDecision(input.currentPrice, 'Trading stopped - drawdown protection active', input.agentOutputs);
       }
 
       // ========== PHASE 3: Get Regime Strategy ==========
@@ -141,7 +141,7 @@ export class MasterOrchestrator {
 
         if (mcResult.probHitTP < 0.50) {
           logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probHitTP * 100).toFixed(1)}% < 50%`);
-          return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%`);
+          return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%`, input.agentOutputs);
         }
 
         // Optimal Distance check
@@ -163,7 +163,7 @@ export class MasterOrchestrator {
 
         if (distanceResult.distanceRatio > 1.5) {
           logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.distanceRatio.toFixed(2)} > 1.5 (too far from winning patterns)`);
-          return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.distanceRatio.toFixed(2)}`);
+          return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.distanceRatio.toFixed(2)}`, input.agentOutputs);
         }
 
         // ========== PHASE 6: Entry Optimization (NEW!) ==========
@@ -204,7 +204,7 @@ export class MasterOrchestrator {
       return decision;
     } catch (error) {
       logger.error('Master Orchestrator error:', error);
-      return this.getHoldDecision(input.currentPrice, 'Orchestration error');
+      return this.getHoldDecision(input.currentPrice, 'Orchestration error', input.agentOutputs);
     }
   }
 
@@ -241,7 +241,7 @@ export class MasterOrchestrator {
       logger.debug('DeepSeek V3.2-Speciale reasoning:', response.reasoningContent.slice(0, 500));
     }
 
-    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus, explosiveBonus, input.atr);
+    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus, explosiveBonus, input.atr, input.agentOutputs);
   }
 
   private getSystemPrompt(assetType: string, aggressiveMode: boolean, isExplosiveTrend: boolean = false): string {
@@ -499,7 +499,8 @@ Provide your trading decision as JSON.`;
     aggressiveMode: boolean,
     momentumBonus?: number,
     explosiveBonus: number = 0,
-    atr?: number
+    atr?: number,
+    agentOutputs?: { research: ResearchOutput; technical: TechnicalOutput; predictor: PredictorOutput }
   ): SignalDecision {
     try {
       const jsonMatch = content.match(/\{[\s\S]*\}/);
@@ -593,7 +594,7 @@ Provide your trading decision as JSON.`;
           takeProfit2: parsed.take_profit_2 || 0,
           takeProfit3: parsed.take_profit_3 || 0,
           reasoning: parsed.reasoning || content,
-          agentOutputs: {},
+          agentOutputs: agentOutputs || {},
           agentScores
         };
       }
@@ -603,7 +604,11 @@ Provide your trading decision as JSON.`;
     }
   }
 
-  private getHoldDecision(currentPrice: number, reason: string): SignalDecision {
+  private getHoldDecision(
+    currentPrice: number, 
+    reason: string, 
+    agentOutputs?: { research: ResearchOutput; technical: TechnicalOutput; predictor: PredictorOutput }
+  ): SignalDecision {
     return {
       action: 'HOLD',
       confidence: 0,
@@ -613,7 +618,7 @@ Provide your trading decision as JSON.`;
       takeProfit2: 0,
       takeProfit3: 0,
       reasoning: reason,
-      agentOutputs: {},
+      agentOutputs: agentOutputs || {},
       agentScores: { research: 0, technical: 0, predictor: 0 }
     };
   }
