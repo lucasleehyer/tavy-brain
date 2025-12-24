@@ -63,6 +63,36 @@ export class SettingsRepository {
     return this.cachedSettings.get(key) || null;
   }
 
+  async getSettings(): Promise<{
+    risk_percent_per_trade: number;
+    max_lot_size: number;
+    max_lot_size_gold: number;
+    max_concurrent_positions: number;
+    ai_calls_enabled: number;
+  }> {
+    // Return cached values if available
+    if (this.cachedSettings.size > 0) {
+      return {
+        risk_percent_per_trade: this.cachedSettings.get('risk_percent_per_trade') || 2,
+        max_lot_size: this.cachedSettings.get('max_lot_size') || 0.5,
+        max_lot_size_gold: this.cachedSettings.get('max_lot_size_gold') || 0.1,
+        max_concurrent_positions: this.cachedSettings.get('max_concurrent_positions') || 3,
+        ai_calls_enabled: this.cachedSettings.get('ai_calls_enabled') || 1
+      };
+    }
+
+    // Load from database
+    await this.loadSettings();
+    
+    return {
+      risk_percent_per_trade: this.cachedSettings.get('risk_percent_per_trade') || 2,
+      max_lot_size: this.cachedSettings.get('max_lot_size') || 0.5,
+      max_lot_size_gold: this.cachedSettings.get('max_lot_size_gold') || 0.1,
+      max_concurrent_positions: this.cachedSettings.get('max_concurrent_positions') || 3,
+      ai_calls_enabled: this.cachedSettings.get('ai_calls_enabled') || 1
+    };
+  }
+
   async getRiskPercent(): Promise<number> {
     const cached = this.cachedSettings.get('risk_percent_per_trade');
     if (cached !== undefined) return cached;
@@ -74,8 +104,8 @@ export class SettingsRepository {
       .single();
 
     if (error || !data) {
-      logger.warn('Risk percent setting not found, using default 10%');
-      return 10;
+      logger.warn('Risk percent setting not found, using default 2%');
+      return 2;
     }
 
     this.cachedSettings.set('risk_percent_per_trade', data.value);
