@@ -93,12 +93,16 @@ export class KellyCalculator {
     
     if (symbol) {
       try {
-        bayesianResult = await this.bayesianEngine.calculate(symbol);
-        uncertaintyPenalty = bayesianResult.uncertaintyPenalty || 0;
+        bayesianResult = await this.bayesianEngine.calculate({
+          wins: stats.wins,
+          losses: stats.losses,
+          totalTrades: stats.totalTrades
+        });
+        uncertaintyPenalty = bayesianResult.uncertainty || 0;
         
         // Use Bayesian mean if available
-        if (bayesianResult.meanWinRate) {
-          stats.winRate = bayesianResult.meanWinRate;
+        if (bayesianResult.posteriorWinRate) {
+          stats.winRate = bayesianResult.posteriorWinRate;
           logger.info(`[KELLY] Using Bayesian win rate: ${(stats.winRate * 100).toFixed(1)}% (uncertainty penalty: ${(uncertaintyPenalty * 100).toFixed(1)}%)`);
         }
       } catch (error) {
@@ -139,7 +143,7 @@ export class KellyCalculator {
     // Ensure minimum
     recommended = Math.max(recommended, 0.5);
 
-    const reason = this.generateReason(stats, kellyPercent, recommended, bayesianResult);
+    const reason = this.generateReason(stats, kellyPercent, recommended);
 
     logger.info(`[KELLY] WinRate=${(W * 100).toFixed(1)}%, R:R=${R.toFixed(2)}, Kelly=${kellyPercent.toFixed(2)}%, Bayesian adj=${(uncertaintyPenalty * 100).toFixed(1)}%, Recommended=${recommended.toFixed(2)}%`);
 

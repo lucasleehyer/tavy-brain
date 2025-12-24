@@ -208,6 +208,13 @@ export class SessionFilter {
   }
 
   /**
+   * Check if symbol is tradeable in current session (alias for filter)
+   */
+  check(symbol: string, assetType: 'forex' | 'stock' | 'crypto' = 'forex'): SessionFilterResult {
+    return this.filter(symbol, assetType);
+  }
+
+  /**
    * Check if symbol is tradeable in current session
    */
   isTradeable(symbol: string): boolean {

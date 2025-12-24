@@ -11,7 +11,7 @@ import { PerformanceTracker } from '../analysis/PerformanceTracker';
 import { logger } from '../../utils/logger';
 import { Candle, Indicators, MarketRegime } from '../../types/market';
 import { SignalDecision } from '../../types/signal';
-import { MTFTrendResult, StructureResult, CorrelationResult, SessionResult } from '../../types/quant';
+import { MTFTrendResult, StructureResult, CorrelationResult, SessionFilterResult, OpenPosition } from '../../types/quant';
 
 interface MultiTimeframeCandles {
   '5m': Candle[];
@@ -29,7 +29,7 @@ interface AICouncilInput {
   regime: MarketRegime;
   accountBalance: number;
   riskPercent: number;
-  openPositions?: { symbol: string; direction: 'long' | 'short' }[];
+  openPositions?: OpenPosition[];
 }
 
 export class AICouncil {
@@ -72,8 +72,12 @@ export class AICouncil {
       // ========== PHASE 1: Pre-filters (run in parallel) ==========
       const [mtfTrend, session, correlation] = await Promise.all([
         this.mtfTrendFilter.analyze(mtfCandles),
-        Promise.resolve(this.sessionFilter.check(input.symbol)),
-        Promise.resolve(this.correlationGuard.check(input.symbol, 'long', input.openPositions || []))
+        Promise.resolve(this.sessionFilter.filter(input.symbol, input.assetType)),
+        Promise.resolve(this.correlationGuard.check(
+          input.symbol, 
+          'long', 
+          input.openPositions || []
+        ))
       ]);
 
       logger.info(`[Phase 1] MTF=${mtfTrend.allowedDirection}, Session=${session.canTrade ? 'OK' : session.reason}, Correlation=${correlation.canTrade ? 'OK' : correlation.reason}`);
@@ -93,7 +97,8 @@ export class AICouncil {
       // ========== PHASE 1b: Structure Validation ==========
       let structure: StructureResult | undefined;
       if (atr > 0 && technicalCandles.length >= 20) {
-        structure = this.structureValidator.validate(technicalCandles, input.currentPrice, atr);
+        const structureDirection = mtfTrend.allowedDirection === 'long' ? 'BUY' : 'SELL';
+        structure = this.structureValidator.validate(technicalCandles, input.currentPrice, structureDirection, atr);
         logger.info(`[Phase 1] Structure: ${structure.structureType} (${structure.entryQuality})`);
         
         if (structure.entryQuality === 'invalid') {

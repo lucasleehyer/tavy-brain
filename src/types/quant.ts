@@ -117,6 +117,16 @@ export interface SessionFilterResult {
   reason: string;
 }
 
+// Backward compatibility aliases
+export type SessionResult = SessionFilterResult;
+
+// Re-export for AICouncil
+export interface OpenPosition {
+  symbol: string;
+  direction: 'long' | 'short';
+  size: number;
+}
+
 // ═══════════════════════════════════════════════════════════════
 //                     CONFIDENCE CALCULATOR TYPES
 // ═══════════════════════════════════════════════════════════════

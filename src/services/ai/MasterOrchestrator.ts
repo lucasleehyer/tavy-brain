@@ -11,9 +11,9 @@ import { ConfidenceCalculator } from './ConfidenceCalculator';
 import { BayesianEngine } from '../quant/BayesianEngine';
 import { MonteCarloSimulator } from '../quant/MonteCarloSimulator';
 import { EntryOptimizer } from '../quant/EntryOptimizer';
-import { DrawdownController, DrawdownState } from '../risk/DrawdownController';
+import { DrawdownController } from '../risk/DrawdownController';
 import { OptimalTransportDistance } from '../quant/OptimalTransportDistance';
-import { MTFTrendResult, StructureResult, CorrelationResult, SessionResult } from '../../types/quant';
+import { MTFTrendResult, StructureResult, CorrelationResult, SessionFilterResult, DrawdownResult } from '../../types/quant';
 
 interface KeyLevelInfo {
   nearestSupport: number | null;
@@ -44,7 +44,7 @@ interface OrchestratorInput {
   mtfTrend?: MTFTrendResult;
   structure?: StructureResult;
   correlation?: CorrelationResult;
-  session?: SessionResult;
+  session?: SessionFilterResult;
 }
 
 // Aggressive mode thresholds for paper trading
@@ -109,15 +109,18 @@ export class MasterOrchestrator {
 
     try {
       // ========== PHASE 2: Check Drawdown State ==========
-      const drawdownState = await this.drawdownController.getState();
-      if (drawdownState === 'STOPPED') {
+      const drawdownResult = await this.drawdownController.getState();
+      if (drawdownResult.state === 'STOPPED') {
         logger.warn(`[Orchestrator] ${input.symbol}: Trading STOPPED due to drawdown protection`);
         return this.getHoldDecision(input.currentPrice, 'Trading stopped - drawdown protection active');
       }
 
       // ========== PHASE 3: Get Regime Strategy ==========
-      const regimeStrategy = this.regimeRouter.getStrategy(input.regime);
-      logger.info(`[Orchestrator] ${input.symbol}: Regime=${input.regime.type}, Strategy=${regimeStrategy.strategy}`);
+      const rsi = input.agentOutputs.technical?.indicators?.rsi || 50;
+      const atKeyLevel = input.keyLevels?.atKeyLevel || false;
+      const signalDirection: 'BUY' | 'SELL' = input.mtfTrend?.allowedDirection === 'short' ? 'SELL' : 'BUY';
+      const regimeStrategy = this.regimeRouter.route(input.regime, signalDirection, rsi, atKeyLevel);
+      logger.info(`[Orchestrator] ${input.symbol}: Regime=${input.regime.type}, Strategy=${regimeStrategy.strategy.playbook}`);
 
       // ========== PHASE 4: Run DeepSeek Orchestration ==========
       const decision = await this.orchestrateWithDeepSeek(input, client);
@@ -131,35 +134,42 @@ export class MasterOrchestrator {
           takeProfit: decision.takeProfit1,
           volatility: input.atr,
           drift: decision.action === 'BUY' ? 0.0001 : -0.0001,
-          numPaths: 100,
-          timeHorizon: 24
+          periods: 200
         });
 
-        logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo P(TP)=${(mcResult.probabilityTP * 100).toFixed(1)}%, EV=${mcResult.expectedPnL.toFixed(2)}`);
+        logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%, EV=${mcResult.expectedPnL.toFixed(2)}`);
 
-        if (mcResult.probabilityTP < 0.50) {
-          logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probabilityTP * 100).toFixed(1)}% < 50%`);
-          return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probabilityTP * 100).toFixed(1)}%`);
+        if (mcResult.probHitTP < 0.50) {
+          logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probHitTP * 100).toFixed(1)}% < 50%`);
+          return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%`);
         }
 
         // Optimal Distance check
+        const structureScore = input.structure?.entryQuality === 'excellent' ? 90 : 
+                               input.structure?.entryQuality === 'good' ? 70 :
+                               input.structure?.entryQuality === 'poor' ? 40 : 50;
+        const mtfScore = input.mtfTrend?.alignment === 'full' ? 90 :
+                         input.mtfTrend?.alignment === 'partial' ? 60 : 30;
+        const sessionName = input.session?.session?.name || 'london';
+        
         const distanceResult = await this.distanceCalculator.calculate({
-          symbol: input.symbol,
           confluence: decision.confidence,
           confidence: decision.confidence,
           regime: input.regime.type,
-          structure: input.structure?.structureType || 'none'
+          structure: structureScore,
+          session: sessionName,
+          mtfAlignment: mtfScore
         });
 
-        if (distanceResult.ratio > 1.5) {
-          logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.ratio.toFixed(2)} > 1.5 (too far from winning patterns)`);
-          return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.ratio.toFixed(2)}`);
+        if (distanceResult.distanceRatio > 1.5) {
+          logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.distanceRatio.toFixed(2)} > 1.5 (too far from winning patterns)`);
+          return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.distanceRatio.toFixed(2)}`);
         }
 
         // Apply drawdown state adjustment to confidence
-        const drawdownMultiplier = this.drawdownController.getSizeMultiplier(drawdownState);
+        const drawdownMultiplier = await this.drawdownController.getSizeMultiplier();
         if (drawdownMultiplier < 1) {
-          logger.info(`[Orchestrator] ${input.symbol}: Drawdown state=${drawdownState}, size multiplier=${drawdownMultiplier}`);
+          logger.info(`[Orchestrator] ${input.symbol}: Drawdown state=${drawdownResult.state}, size multiplier=${drawdownMultiplier}`);
         }
       }
 
