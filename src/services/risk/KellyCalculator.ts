@@ -1,5 +1,6 @@
 import { supabase } from '../database/SupabaseClient';
 import { logger } from '../../utils/logger';
+import { BayesianEngine } from '../quant/BayesianEngine';
 
 interface TradeStats {
   totalTrades: number;
@@ -18,6 +19,7 @@ interface KellyResult {
   recommendedPercent: number;
   reason: string;
   stats: TradeStats;
+  bayesianAdjustment?: number;
 }
 
 interface KellyConfig {
@@ -40,20 +42,37 @@ const DEFAULT_CONFIG: KellyConfig = {
  * Kelly Criterion Calculator for Optimal Position Sizing
  * Based on: f* = W - (1-W)/R
  * Where: W = win rate, R = average win/average loss ratio
+ * 
+ * Now integrated with BayesianEngine for uncertainty-aware sizing
  */
 export class KellyCalculator {
   private config: KellyConfig;
   private cachedStats: TradeStats | null = null;
   private lastStatsUpdate: Date | null = null;
+  private bayesianEngine: BayesianEngine;
 
-  constructor(config?: Partial<KellyConfig>) {
-    this.config = { ...DEFAULT_CONFIG, ...config };
+  constructor(configOrBayesian?: Partial<KellyConfig> | BayesianEngine) {
+    if (configOrBayesian instanceof BayesianEngine) {
+      this.config = { ...DEFAULT_CONFIG };
+      this.bayesianEngine = configOrBayesian;
+    } else {
+      this.config = { ...DEFAULT_CONFIG, ...configOrBayesian };
+      this.bayesianEngine = new BayesianEngine();
+    }
   }
 
   /**
-   * Calculate optimal Kelly position size
+   * Calculate optimal Kelly position size with Bayesian uncertainty adjustment
    */
-  async calculate(assetType?: 'forex' | 'crypto'): Promise<KellyResult> {
+  async calculate(assetTypeOrSymbol?: 'forex' | 'crypto' | string): Promise<KellyResult> {
+    // Determine if it's an asset type or symbol
+    const assetType = (assetTypeOrSymbol === 'forex' || assetTypeOrSymbol === 'crypto') 
+      ? assetTypeOrSymbol 
+      : undefined;
+    const symbol = (assetTypeOrSymbol && assetTypeOrSymbol !== 'forex' && assetTypeOrSymbol !== 'crypto')
+      ? assetTypeOrSymbol
+      : undefined;
+
     const stats = await this.getTradeStats(assetType);
 
     // If not enough trades, use default
@@ -66,6 +85,25 @@ export class KellyCalculator {
         reason: `Insufficient trade history (${stats.totalTrades}/${this.config.minTrades} required)`,
         stats
       };
+    }
+
+    // Get Bayesian posterior for win probability if symbol provided
+    let bayesianResult = null;
+    let uncertaintyPenalty = 0;
+    
+    if (symbol) {
+      try {
+        bayesianResult = await this.bayesianEngine.calculate(symbol);
+        uncertaintyPenalty = bayesianResult.uncertaintyPenalty || 0;
+        
+        // Use Bayesian mean if available
+        if (bayesianResult.meanWinRate) {
+          stats.winRate = bayesianResult.meanWinRate;
+          logger.info(`[KELLY] Using Bayesian win rate: ${(stats.winRate * 100).toFixed(1)}% (uncertainty penalty: ${(uncertaintyPenalty * 100).toFixed(1)}%)`);
+        }
+      } catch (error) {
+        logger.warn('[KELLY] Bayesian calculation failed, using historical stats:', error);
+      }
     }
 
     // Kelly formula: f* = W - (1-W)/R
@@ -84,15 +122,16 @@ export class KellyCalculator {
         quarterKellyPercent: 0,
         recommendedPercent: 0,
         reason: `Negative Kelly (${kellyPercent.toFixed(2)}%) - edge is negative, should not trade`,
-        stats
+        stats,
+        bayesianAdjustment: uncertaintyPenalty
       };
     }
 
     const halfKelly = kellyPercent * 0.5;
     const quarterKelly = kellyPercent * 0.25;
     
-    // Apply configured fraction
-    let recommended = kellyPercent * this.config.kellyFraction;
+    // Apply configured fraction and Bayesian uncertainty penalty
+    let recommended = kellyPercent * this.config.kellyFraction * (1 - uncertaintyPenalty);
     
     // Cap at maximum
     recommended = Math.min(recommended, this.config.maxRiskPercent);
@@ -100,9 +139,9 @@ export class KellyCalculator {
     // Ensure minimum
     recommended = Math.max(recommended, 0.5);
 
-    const reason = this.generateReason(stats, kellyPercent, recommended);
+    const reason = this.generateReason(stats, kellyPercent, recommended, bayesianResult);
 
-    logger.info(`[KELLY] WinRate=${(W * 100).toFixed(1)}%, R:R=${R.toFixed(2)}, Kelly=${kellyPercent.toFixed(2)}%, Recommended=${recommended.toFixed(2)}%`);
+    logger.info(`[KELLY] WinRate=${(W * 100).toFixed(1)}%, R:R=${R.toFixed(2)}, Kelly=${kellyPercent.toFixed(2)}%, Bayesian adj=${(uncertaintyPenalty * 100).toFixed(1)}%, Recommended=${recommended.toFixed(2)}%`);
 
     return {
       kellyPercent,
@@ -110,7 +149,8 @@ export class KellyCalculator {
       quarterKellyPercent: quarterKelly,
       recommendedPercent: recommended,
       reason,
-      stats
+      stats,
+      bayesianAdjustment: uncertaintyPenalty
     };
   }
 

@@ -5,6 +5,15 @@ import { MarketRegime } from '../../types/market';
 import { DeepSeekClient } from './DeepSeekClient';
 import { isCryptoPair } from '../../config/pairs';
 import { CRYPTO_THRESHOLDS, ANTI_SCALPING } from '../../config/thresholds';
+// Phase 2 & 3: Quant Brain imports
+import { RegimeStrategyRouter } from './RegimeStrategyRouter';
+import { ConfidenceCalculator } from './ConfidenceCalculator';
+import { BayesianEngine } from '../quant/BayesianEngine';
+import { MonteCarloSimulator } from '../quant/MonteCarloSimulator';
+import { EntryOptimizer } from '../quant/EntryOptimizer';
+import { DrawdownController, DrawdownState } from '../risk/DrawdownController';
+import { OptimalTransportDistance } from '../quant/OptimalTransportDistance';
+import { MTFTrendResult, StructureResult, CorrelationResult, SessionResult } from '../../types/quant';
 
 interface KeyLevelInfo {
   nearestSupport: number | null;
@@ -31,6 +40,11 @@ interface OrchestratorInput {
   // ATR and Key Levels for SL/TP placement
   atr?: number;
   keyLevels?: KeyLevelInfo;
+  // Phase 1 filter results (pre-computed in AICouncil)
+  mtfTrend?: MTFTrendResult;
+  structure?: StructureResult;
+  correlation?: CorrelationResult;
+  session?: SessionResult;
 }
 
 // Aggressive mode thresholds for paper trading
@@ -59,6 +73,25 @@ const EXPLOSIVE_CONFIG = {
 
 export class MasterOrchestrator {
   private client: DeepSeekClient | null = null;
+  // Phase 2 & 3: Quant Brain components
+  private regimeRouter: RegimeStrategyRouter;
+  private confidenceCalculator: ConfidenceCalculator;
+  private bayesianEngine: BayesianEngine;
+  private monteCarloSimulator: MonteCarloSimulator;
+  private entryOptimizer: EntryOptimizer;
+  private drawdownController: DrawdownController;
+  private distanceCalculator: OptimalTransportDistance;
+
+  constructor() {
+    // Initialize Quant Brain components
+    this.regimeRouter = new RegimeStrategyRouter();
+    this.confidenceCalculator = new ConfidenceCalculator();
+    this.bayesianEngine = new BayesianEngine();
+    this.monteCarloSimulator = new MonteCarloSimulator();
+    this.entryOptimizer = new EntryOptimizer();
+    this.drawdownController = new DrawdownController();
+    this.distanceCalculator = new OptimalTransportDistance();
+  }
 
   private getClient(): DeepSeekClient | null {
     if (!this.client && config.ai.deepseek?.apiKey) {
@@ -75,7 +108,62 @@ export class MasterOrchestrator {
     }
 
     try {
-      return await this.orchestrateWithDeepSeek(input, client);
+      // ========== PHASE 2: Check Drawdown State ==========
+      const drawdownState = await this.drawdownController.getState();
+      if (drawdownState === 'STOPPED') {
+        logger.warn(`[Orchestrator] ${input.symbol}: Trading STOPPED due to drawdown protection`);
+        return this.getHoldDecision(input.currentPrice, 'Trading stopped - drawdown protection active');
+      }
+
+      // ========== PHASE 3: Get Regime Strategy ==========
+      const regimeStrategy = this.regimeRouter.getStrategy(input.regime);
+      logger.info(`[Orchestrator] ${input.symbol}: Regime=${input.regime.type}, Strategy=${regimeStrategy.strategy}`);
+
+      // ========== PHASE 4: Run DeepSeek Orchestration ==========
+      const decision = await this.orchestrateWithDeepSeek(input, client);
+
+      // ========== PHASE 5: Apply Quant Validations ==========
+      if (decision.action !== 'HOLD' && input.atr && input.atr > 0) {
+        // Monte Carlo validation
+        const mcResult = await this.monteCarloSimulator.simulate({
+          entryPrice: decision.entryPrice,
+          stopLoss: decision.stopLoss,
+          takeProfit: decision.takeProfit1,
+          volatility: input.atr,
+          drift: decision.action === 'BUY' ? 0.0001 : -0.0001,
+          numPaths: 100,
+          timeHorizon: 24
+        });
+
+        logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo P(TP)=${(mcResult.probabilityTP * 100).toFixed(1)}%, EV=${mcResult.expectedPnL.toFixed(2)}`);
+
+        if (mcResult.probabilityTP < 0.50) {
+          logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probabilityTP * 100).toFixed(1)}% < 50%`);
+          return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probabilityTP * 100).toFixed(1)}%`);
+        }
+
+        // Optimal Distance check
+        const distanceResult = await this.distanceCalculator.calculate({
+          symbol: input.symbol,
+          confluence: decision.confidence,
+          confidence: decision.confidence,
+          regime: input.regime.type,
+          structure: input.structure?.structureType || 'none'
+        });
+
+        if (distanceResult.ratio > 1.5) {
+          logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.ratio.toFixed(2)} > 1.5 (too far from winning patterns)`);
+          return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.ratio.toFixed(2)}`);
+        }
+
+        // Apply drawdown state adjustment to confidence
+        const drawdownMultiplier = this.drawdownController.getSizeMultiplier(drawdownState);
+        if (drawdownMultiplier < 1) {
+          logger.info(`[Orchestrator] ${input.symbol}: Drawdown state=${drawdownState}, size multiplier=${drawdownMultiplier}`);
+        }
+      }
+
+      return decision;
     } catch (error) {
       logger.error('Master Orchestrator error:', error);
       return this.getHoldDecision(input.currentPrice, 'Orchestration error');
