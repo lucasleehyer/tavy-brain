@@ -222,6 +222,10 @@ export class ActivityLogger {
   async logError(message: string, details?: Record<string, any>): Promise<void> {
     await this.log('error', null, `⚠️ ${message}`, details);
   }
+
+  async logInfo(message: string, details?: Record<string, any>): Promise<void> {
+    await this.log('info', null, `ℹ️ ${message}`, details);
+  }
 }
 
 export const activityLogger = new ActivityLogger();
