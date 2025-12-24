@@ -80,16 +80,43 @@ export function getCurrentSession(symbol?: string): 'asian' | 'london' | 'newyor
 }
 
 /**
+ * MINIMUM STOP LOSS DISTANCES
+ * Prevents tiny SL that cause oversized positions
+ */
+const MIN_SL_PIPS_FOREX = 15;      // Minimum 15 pips for forex
+const MIN_SL_PIPS_METALS = 50;    // Minimum 50 pips for gold/silver
+const MIN_SL_PERCENT_CRYPTO = 1.5; // Minimum 1.5% for crypto
+
+/**
  * Calculate lot size based on risk (forex/metals)
+ * Now with minimum SL enforcement to prevent oversized positions
  */
 export function calculateLotSize(
   accountBalance: number,
   riskPercent: number,
   stopLossPips: number,
-  pipValue: number = 10
+  pipValue: number = 10,
+  symbol?: string
 ): number {
+  // Determine minimum SL based on instrument
+  let minSlPips = MIN_SL_PIPS_FOREX;
+  if (symbol) {
+    if (symbol.includes('XAU') || symbol.includes('GOLD')) {
+      minSlPips = MIN_SL_PIPS_METALS;
+    } else if (symbol.includes('XAG') || symbol.includes('SILVER')) {
+      minSlPips = MIN_SL_PIPS_METALS;
+    }
+  }
+  
+  // Enforce minimum SL distance
+  const effectiveSlPips = Math.max(stopLossPips, minSlPips);
+  
+  if (stopLossPips < minSlPips) {
+    console.warn(`[LOT SIZE] SL too tight: ${stopLossPips} pips < min ${minSlPips} pips. Using ${effectiveSlPips} pips.`);
+  }
+  
   const riskAmount = accountBalance * (riskPercent / 100);
-  let lotSize = riskAmount / (stopLossPips * pipValue);
+  let lotSize = riskAmount / (effectiveSlPips * pipValue);
 
   // Round to 2 decimal places
   lotSize = Math.round(lotSize * 100) / 100;
@@ -102,6 +129,7 @@ export function calculateLotSize(
 
 /**
  * Calculate lot size for crypto CFDs (percentage-based)
+ * Now with minimum SL enforcement to prevent oversized positions
  */
 export function calculateCryptoLotSize(
   accountBalance: number,
@@ -110,12 +138,19 @@ export function calculateCryptoLotSize(
   entryPrice: number,
   maxLeverage: number = 20
 ): number {
+  // Enforce minimum SL percentage to prevent tiny SL / huge positions
+  const effectiveSlPercent = Math.max(stopLossPercent, MIN_SL_PERCENT_CRYPTO);
+  
+  if (stopLossPercent < MIN_SL_PERCENT_CRYPTO) {
+    console.warn(`[CRYPTO LOT SIZE] SL too tight: ${stopLossPercent}% < min ${MIN_SL_PERCENT_CRYPTO}%. Using ${effectiveSlPercent}%.`);
+  }
+  
   // Risk amount in dollars
   const riskAmount = accountBalance * (riskPercent / 100);
   
   // Position size based on stop loss percentage
   // If SL is 2% away, and we want to risk $100, position = $100 / 0.02 = $5000
-  const positionValue = riskAmount / (stopLossPercent / 100);
+  const positionValue = riskAmount / (effectiveSlPercent / 100);
   
   // Convert to lots (units of the crypto)
   // For BTCUSD at $60000, $5000 position = 0.083 BTC
@@ -125,6 +160,7 @@ export function calculateCryptoLotSize(
   const maxPositionValue = accountBalance * maxLeverage;
   if (positionValue > maxPositionValue) {
     lotSize = maxPositionValue / entryPrice;
+    console.warn(`[CRYPTO LOT SIZE] Position exceeds max leverage. Capped to ${lotSize.toFixed(4)} lots.`);
   }
   
   // Round to appropriate precision based on price
