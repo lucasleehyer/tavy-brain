@@ -156,15 +156,31 @@ export class AlertManager {
   async alertTradeClosed(
     symbol: string,
     pnl: number,
-    outcome: 'win' | 'loss'
+    outcome: 'win' | 'loss',
+    direction?: 'BUY' | 'SELL',
+    entryPrice?: number,
+    exitPrice?: number,
+    lotSize?: number,
+    accountName?: string,
+    holdDurationMinutes?: number,
+    pnlPips?: number,
+    assetType?: string
   ): Promise<void> {
     const emoji = outcome === 'win' ? '✅' : '❌';
-    logger.info(`[ALERT] Trade closed ${emoji}: ${symbol} with ${outcome.toUpperCase()}, P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`);
+    logger.info(`[ALERT] Trade closed ${emoji}: ${symbol} ${direction || ''} with ${outcome.toUpperCase()}, P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}${pnlPips !== undefined ? ` (${pnlPips.toFixed(1)} pips)` : ''}`);
     await this.sendToSupabase({
       type: 'trade_closed',
       symbol,
       pnl,
       outcome,
+      direction,
+      entryPrice,
+      exitPrice,
+      lotSize,
+      accountName,
+      holdDurationMinutes,
+      pnlPips,
+      assetType: assetType || 'forex',
     });
   }
 }
