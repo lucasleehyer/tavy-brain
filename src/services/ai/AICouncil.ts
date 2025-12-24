@@ -162,6 +162,21 @@ export class AICouncil {
         }
       }
 
+      // ========== Log Performance Data for Tracking ==========
+      if (decision.action !== 'HOLD') {
+        try {
+          // Get current performance context for this setup
+          const perfData = await this.performanceTracker.getWinRateFor({
+            symbol: input.symbol,
+            regime: input.regime.type,
+            session: session.session?.name
+          });
+          logger.info(`[AI Council] Historical win rate for similar setup: ${(perfData.winRate * 100).toFixed(1)}% (n=${perfData.sampleSize})`);
+        } catch (error) {
+          logger.warn('[AI Council] Failed to fetch performance data', error);
+        }
+      }
+
       return decision;
 
     } catch (error) {

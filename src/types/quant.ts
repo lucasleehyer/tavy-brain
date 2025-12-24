@@ -48,6 +48,7 @@ export interface StructureResult {
   orderBlockDetected: boolean;
   fvgDetected: boolean;
   reason: string;
+  recentCandles?: import('./market').Candle[]; // For Entry Optimizer
 }
 
 // ═══════════════════════════════════════════════════════════════

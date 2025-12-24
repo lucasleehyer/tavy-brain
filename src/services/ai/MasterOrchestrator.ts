@@ -166,6 +166,34 @@ export class MasterOrchestrator {
           return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.distanceRatio.toFixed(2)}`);
         }
 
+        // ========== PHASE 6: Entry Optimization (NEW!) ==========
+        // Only attempt entry optimization if we have recent candle data
+        if (input.structure) {
+          try {
+            const recentCandles = input.structure.recentCandles || [];
+            if (recentCandles.length >= 10) {
+              const entryOptResult = await this.entryOptimizer.optimize({
+                currentPrice: decision.entryPrice,
+                direction: decision.action as 'BUY' | 'SELL',
+                atr: input.atr,
+                recentCandles,
+                nearestSupport: input.keyLevels?.nearestSupport || undefined,
+                nearestResistance: input.keyLevels?.nearestResistance || undefined
+              });
+
+              logger.info(`[Orchestrator] ${input.symbol}: Entry Optimizer: ${entryOptResult.useLimit ? 'LIMIT' : 'MARKET'} @ ${entryOptResult.optimalEntry.toFixed(5)} (${entryOptResult.expectedImprovement.toFixed(1)} pips better, ${(entryOptResult.fillProbability * 100).toFixed(0)}% fill)`);
+
+              // If limit order is recommended with good fill probability, use optimal entry
+              if (entryOptResult.useLimit && entryOptResult.fillProbability >= 0.6) {
+                decision.entryPrice = entryOptResult.optimalEntry;
+                decision.reasoning += ` | Entry optimized: ${entryOptResult.reason}`;
+              }
+            }
+          } catch (error) {
+            logger.warn(`[Orchestrator] ${input.symbol}: Entry optimization failed, using market price`, error);
+          }
+        }
+
         // Apply drawdown state adjustment to confidence
         const drawdownMultiplier = await this.drawdownController.getSizeMultiplier();
         if (drawdownMultiplier < 1) {

@@ -3,6 +3,7 @@ import { TradeRepository } from '../database/TradeRepository';
 import { SettingsRepository } from '../database/SettingsRepository';
 import { AlertManager } from '../notifications/AlertManager';
 import { CircuitBreaker } from '../risk/CircuitBreaker';
+import { KellyCalculator } from '../risk/KellyCalculator';
 import { activityLogger } from '../database/ActivityLogger';
 import { logger } from '../../utils/logger';
 import { Signal } from '../../types/signal';
@@ -54,6 +55,7 @@ export class ExecutionRouter {
   private settingsRepo: SettingsRepository;
   private alertManager: AlertManager;
   private circuitBreaker: CircuitBreaker;
+  private kellyCalculator: KellyCalculator;
   private config: ExecutionConfig;
   private accountConnections: Map<string, MetaApiManager> = new Map();
 
@@ -62,6 +64,7 @@ export class ExecutionRouter {
     this.settingsRepo = new SettingsRepository();
     this.alertManager = new AlertManager();
     this.circuitBreaker = new CircuitBreaker();
+    this.kellyCalculator = new KellyCalculator();
     this.config = config;
   }
 
@@ -134,10 +137,27 @@ export class ExecutionRouter {
 
     logger.info(`Found ${accounts.length} active execution accounts`);
 
+    // ========== KELLY CALCULATOR INTEGRATION ==========
+    // Get Kelly-optimal risk first, then apply confidence tier adjustments
+    const assetType = isCryptoPair(signal.symbol) ? 'crypto' : 'forex';
+    let baseRiskPercent = this.config.defaultRiskPercent;
+    
+    try {
+      const kellyResult = await this.kellyCalculator.calculate(assetType);
+      if (kellyResult.recommendedPercent > 0) {
+        baseRiskPercent = kellyResult.recommendedPercent;
+        logger.info(`[KELLY] Using Kelly-optimal risk: ${baseRiskPercent.toFixed(2)}% (${kellyResult.reason})`);
+      } else {
+        logger.info(`[KELLY] No edge detected, using default risk: ${baseRiskPercent}%`);
+      }
+    } catch (error) {
+      logger.warn('[KELLY] Failed to calculate Kelly, using default risk:', error);
+    }
+
     // Calculate dynamic risk based on signal confidence and confluence
     const confluenceScore = signal.snapshotSettings?.confluenceScore || 60;
     const dynamicRisk = this.calculateDynamicRisk({
-      baseRiskPercent: this.config.defaultRiskPercent,
+      baseRiskPercent,
       confidence: signal.confidence,
       confluenceScore
     });

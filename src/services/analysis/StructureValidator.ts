@@ -109,7 +109,8 @@ export class StructureValidator {
       withinRange,
       orderBlockDetected: orderBlock.detected,
       fvgDetected: fvg.detected,
-      reason
+      reason,
+      recentCandles: candles.slice(-20) // Include recent candles for Entry Optimizer
     };
 
     logger.info(`[STRUCTURE] ${entryQuality.toUpperCase()} | ${structureType} | ${reason}`);
