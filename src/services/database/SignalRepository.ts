@@ -103,9 +103,19 @@ export class SignalRepository {
     narrative: string;
     engineConsensus?: any;
     rejectionReason?: string;
+    tokensUsed?: number;
+    modelUsed?: string;
   }): Promise<void> {
     try {
       const userId = this.supabaseManager.getUserId();
+      
+      // Cost calculation based on DeepSeek pricing ($0.14/1M input, $0.28/1M output)
+      // Assume ~80% input tokens, ~20% output tokens
+      const tokensUsed = decision.tokensUsed || 0;
+      const inputCost = (tokensUsed * 0.8) * (0.14 / 1000000);
+      const outputCost = (tokensUsed * 0.2) * (0.28 / 1000000);
+      const estimatedCost = inputCost + outputCost;
+
       await this.supabase.from('ai_decision_log').insert({
         user_id: userId,
         symbol: decision.symbol,
@@ -115,7 +125,11 @@ export class SignalRepository {
         confidence: decision.confidence,
         narrative: decision.narrative,
         engine_consensus: decision.engineConsensus,
-        rejection_reason: decision.rejectionReason
+        rejection_reason: decision.rejectionReason,
+        source: 'vps_tavy_brain',
+        estimated_cost_usd: estimatedCost,
+        tokens_used: tokensUsed,
+        model_used: decision.modelUsed || 'deepseek-chat'
       });
     } catch (error) {
       logger.error('Failed to log decision:', error);
