@@ -47,7 +47,7 @@ export class PreFilter {
     this.momentumThreshold = settings.momentumThresholdPips;
   }
 
-  analyze(symbol: string, candles: Candle[], currentSpread?: number, hasUpcomingNews?: boolean): PreFilterResult {
+  analyze(symbol: string, candles: Candle[], currentSpread?: number, hasUpcomingNews?: boolean, assetType?: string): PreFilterResult {
     const warnings: string[] = [];
 
     // ============ STAGE 1: HARD RULES PRE-FILTER ============
@@ -61,8 +61,8 @@ export class PreFilter {
       };
     }
 
-    // Gate 2: Session & Liquidity check
-    const sessionGate = this.checkSessionGate();
+    // Gate 2: Session & Liquidity check (skip for crypto - trades 24/7)
+    const sessionGate = this.checkSessionGate(assetType);
     if (!sessionGate.passed) {
       return { passed: false, reason: sessionGate.reason, warnings: sessionGate.warnings };
     }
@@ -177,14 +177,19 @@ export class PreFilter {
 
   // ============ HARD GATE CHECKS ============
 
-  private checkSessionGate(): HardGateResult {
+  private checkSessionGate(assetType?: string): HardGateResult {
+    // Crypto trades 24/7 - skip all session checks
+    if (assetType === 'crypto') {
+      return { passed: true };
+    }
+
     const now = new Date();
     const utcHour = now.getUTCHours();
     const utcMinutes = now.getUTCMinutes();
     const dayOfWeek = now.getUTCDay();
     const warnings: string[] = [];
 
-    // No trading on weekends
+    // No trading on weekends (forex/metals only)
     if (dayOfWeek === 0 || dayOfWeek === 6) {
       return { passed: false, reason: 'Weekend - market closed' };
     }
