@@ -181,6 +181,7 @@ export class SignalProcessor {
 
   private async analyzeSymbol(symbol: string, tick: Tick): Promise<void> {
     const assetType = getAssetType(symbol);
+    const isCrypto = isCryptoPair(symbol);
     
     try {
       // Log that we're analyzing
@@ -195,8 +196,20 @@ export class SignalProcessor {
         return; // Not enough data
       }
 
-      // Run pre-filter on 15m candles
-      const preFilterResult = this.preFilter.analyze(symbol, candles15m);
+      // Run appropriate pre-filter based on asset type
+      // Crypto uses CryptoPreFilter (no session restrictions - 24/7 trading)
+      // Forex/metals use PreFilter (session and weekend checks)
+      let preFilterResult;
+      if (isCrypto) {
+        const cryptoResult = this.cryptoPreFilter.analyze(symbol, candles15m);
+        preFilterResult = {
+          passed: cryptoResult.passed,
+          reason: cryptoResult.reason,
+          indicators: cryptoResult.indicators
+        };
+      } else {
+        preFilterResult = this.preFilter.analyze(symbol, candles15m);
+      }
 
       if (!preFilterResult.passed) {
         await this.signalRepo.logDecision({
