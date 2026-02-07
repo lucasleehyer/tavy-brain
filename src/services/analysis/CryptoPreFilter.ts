@@ -23,7 +23,7 @@ const DEFAULT_CONFIG: CryptoPreFilterConfig = {
   minVolatilityPercent: CRYPTO_THRESHOLDS.minVolatilityPercent,
   maxVolatilityPercent: CRYPTO_THRESHOLDS.maxVolatilityPercent,
   minVolumeMultiplier: CRYPTO_THRESHOLDS.minVolumeMultiplier,
-  minMomentumStrength: 0.3 // Minimum momentum score (0-1)
+  minMomentumStrength: 0.2 // Minimum momentum score (0-1) - RELAXED from 0.3
 };
 
 export class CryptoPreFilter {
@@ -88,10 +88,10 @@ export class CryptoPreFilter {
     }
 
     // Check ADX for trend strength (but more lenient for crypto)
-    if (indicators.adx < 15) {
+    if (indicators.adx < 10) {
       return { 
         passed: false, 
-        reason: `Very weak trend: ADX ${indicators.adx.toFixed(1)} (need 15+)`,
+        reason: `Very weak trend: ADX ${indicators.adx.toFixed(1)} (need 10+)`,
         indicators,
         volumeSpike,
         momentumStrength,
