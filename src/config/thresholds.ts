@@ -14,7 +14,7 @@ export interface TradingThresholds {
 // RELAXED for 1+ trade/day during active sessions
 export const DEFAULT_THRESHOLDS: TradingThresholds = {
   minConfidence: 60,        // Reduced from 70 - allow more AI flexibility
-  minAtrPips: 5,
+  minAtrPips: 3,
   momentumThresholdPips: 6,
   dailyLossLimitPct: 10,
   weeklyLossLimitPct: 20,
@@ -30,7 +30,7 @@ export const PREFILTER_THRESHOLDS = {
   rsiOverbought: 65,
 
   // ADX threshold for trending market (reduced from 22 to catch earlier trends)
-  adxTrending: 18,
+  adxTrending: 12,
 
   // Minimum candles for analysis
   minCandles: 50,
@@ -84,11 +84,11 @@ export const NEWS_FILTER = {
 // Extreme volatility thresholds
 export const VOLATILITY_GATES = {
   // Pause if 15m range > this multiplier of average 15m range
-  extremeRangeMultiplier: 3.0,
+  extremeRangeMultiplier: 4.0,
   // Minimum movement in pips in last 2 hours (reduced from 10)
-  minActivityPips: 6,
+  minActivityPips: 4,
   // Minimum distance from daily open (pips)
-  minDistanceFromDailyOpen: 5
+  minDistanceFromDailyOpen: 3
 };
 
 // Anti-scalping rules - AGGRESSIVE for paper trading
@@ -115,7 +115,7 @@ export const ANTI_SCALPING = {
 // Crypto-specific thresholds - AGGRESSIVE for paper trading
 export const CRYPTO_THRESHOLDS = {
   minConfidence: 55,        // AGGRESSIVE: Lower threshold (was 65)
-  minVolatilityPercent: 0.3, // AGGRESSIVE: Lower min volatility (was 0.5)
+  minVolatilityPercent: 0.15, // AGGRESSIVE: Lower min volatility (was 0.3)
   maxVolatilityPercent: 15,  // AGGRESSIVE: Higher max volatility (was 10)
   minVolumeMultiplier: 0.6,  // AGGRESSIVE: Lower volume requirement (was 0.8)
   sessionBuffer: 0,          // No session buffer (24/7)
