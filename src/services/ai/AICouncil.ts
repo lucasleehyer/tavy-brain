@@ -8,6 +8,7 @@ import { StructureValidator } from '../analysis/StructureValidator';
 import { CorrelationGuard } from '../risk/CorrelationGuard';
 import { SessionFilter } from '../analysis/SessionFilter';
 import { PerformanceTracker } from '../analysis/PerformanceTracker';
+import { SettingsRepository } from '../database/SettingsRepository';
 import { logger } from '../../utils/logger';
 import { Candle, Indicators, MarketRegime } from '../../types/market';
 import { SignalDecision } from '../../types/signal';
@@ -44,6 +45,7 @@ export class AICouncil {
   private correlationGuard: CorrelationGuard;
   private sessionFilter: SessionFilter;
   private performanceTracker: PerformanceTracker;
+  private settingsRepo: SettingsRepository;
 
   constructor() {
     this.researchAgent = new ResearchAgent();
@@ -57,6 +59,7 @@ export class AICouncil {
     this.correlationGuard = new CorrelationGuard();
     this.sessionFilter = new SessionFilter();
     this.performanceTracker = new PerformanceTracker();
+    this.settingsRepo = new SettingsRepository();
   }
 
   async analyze(input: AICouncilInput): Promise<SignalDecision> {
@@ -80,13 +83,22 @@ export class AICouncil {
         ))
       ]);
 
-      logger.info(`[Phase 1] MTF=${mtfTrend.allowedDirection}, Session=${session.canTrade ? 'OK' : session.reason}, Correlation=${correlation.canTrade ? 'OK' : correlation.reason}`);
+      // ========== MTF FILTER MODE (database-controllable) ==========
+      // 0 = disabled, 1 = relaxed (allow partial alignment), 2 = strict (block if not aligned)
+      const mtfFilterMode = this.settingsRepo.getSetting('mtf_filter_mode') ?? 2;
+      
+      logger.info(`[Phase 1] MTF=${mtfTrend.allowedDirection}, Session=${session.canTrade ? 'OK' : session.reason}, Correlation=${correlation.canTrade ? 'OK' : correlation.reason}, MTF_MODE=${mtfFilterMode === 2 ? 'strict' : mtfFilterMode === 1 ? 'relaxed' : 'disabled'}`);
 
-      // Early exit if MTF conflicts
-      if (mtfTrend.allowedDirection === 'none') {
-        logger.info(`[AI Council] ${input.symbol}: Blocked by MTF - conflicting timeframe trends`);
+      // Early exit if MTF conflicts — respects database mode
+      if (mtfFilterMode === 2 && mtfTrend.allowedDirection === 'none') {
+        // STRICT: block on any MTF conflict
+        logger.info(`[AI Council] ${input.symbol}: Blocked by MTF (strict mode) - conflicting timeframe trends`);
         return this.createHoldDecision(input.currentPrice, 'MTF trend conflict - timeframes not aligned');
+      } else if (mtfFilterMode === 1 && mtfTrend.allowedDirection === 'none') {
+        // RELAXED: log warning but allow through with reduced confidence (handled downstream)
+        logger.warn(`[AI Council] ${input.symbol}: MTF conflict detected but RELAXED mode — allowing through with caution`);
       }
+      // mtfFilterMode === 0: disabled, skip MTF check entirely
 
       // Early exit if session is bad
       if (!session.canTrade) {
