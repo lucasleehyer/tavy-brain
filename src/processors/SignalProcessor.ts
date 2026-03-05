@@ -256,6 +256,20 @@ export class SignalProcessor {
         riskPercent
       });
 
+      // Fix narrative serialization - ensure it's a string
+      const narrativeStr = typeof decision.reasoning === 'string' 
+        ? decision.reasoning 
+        : JSON.stringify(decision.reasoning);
+
+      // HOLD Override: Convert HOLD to BUY/SELL if we have valid price levels
+      if (decision.action === 'HOLD' && decision.confidence >= 40 && 
+          decision.entryPrice > 0 && decision.stopLoss > 0 && decision.takeProfit1 > 0) {
+        const overrideAction = regime.type.includes('bullish') ? 'BUY' : 'SELL';
+        logger.info(`[HOLD-OVERRIDE] ${symbol}: Converting HOLD→${overrideAction} (conf=${decision.confidence}%, regime=${regime.type})`);
+        await activityLogger.logDecision(symbol, `HOLD→${overrideAction} override`, decision.confidence);
+        decision.action = overrideAction;
+      }
+
       // Log the decision
       await this.signalRepo.logDecision({
         symbol,
@@ -263,15 +277,15 @@ export class SignalProcessor {
         decision: decision.action,
         decisionType: 'ai_council',
         confidence: decision.confidence,
-        narrative: decision.reasoning,
+        narrative: narrativeStr,
         engineConsensus: decision.agentScores,
-        rejectionReason: decision.action === 'HOLD' ? decision.reasoning : undefined
+        rejectionReason: decision.action === 'HOLD' ? narrativeStr : undefined
       });
 
       // Log decision to activity feed
       await activityLogger.logDecision(symbol, decision.action, decision.confidence);
 
-      // Execute if not HOLD and meets confidence threshold (now 70%)
+      // Execute if not HOLD and meets confidence threshold
       if (decision.action !== 'HOLD' && decision.confidence >= this.settings.minConfidence) {
         await activityLogger.logSignal(symbol, decision.action, decision.confidence);
         
