@@ -266,7 +266,7 @@ export class SignalProcessor {
           decision.entryPrice > 0 && decision.stopLoss > 0 && decision.takeProfit1 > 0) {
         const overrideAction = regime.type.includes('bullish') ? 'BUY' : 'SELL';
         logger.info(`[HOLD-OVERRIDE] ${symbol}: Converting HOLD→${overrideAction} (conf=${decision.confidence}%, regime=${regime.type})`);
-        await activityLogger.logDecision(symbol, `HOLD→${overrideAction} override`, decision.confidence);
+        await activityLogger.logInfo(`[HOLD-OVERRIDE] ${symbol}: HOLD→${overrideAction}`, { confidence: decision.confidence });
         decision.action = overrideAction;
       }
 
