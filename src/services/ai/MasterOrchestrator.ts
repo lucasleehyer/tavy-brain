@@ -139,8 +139,8 @@ export class MasterOrchestrator {
 
         logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%, EV=${mcResult.expectedPnL.toFixed(2)}`);
 
-        if (mcResult.probHitTP < 0.50) {
-          logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probHitTP * 100).toFixed(1)}% < 50%`);
+        if (mcResult.probHitTP < 0.35) {
+          logger.info(`[Orchestrator] ${input.symbol}: Monte Carlo probability ${(mcResult.probHitTP * 100).toFixed(1)}% < 35%`);
           return this.getHoldDecision(input.currentPrice, `Monte Carlo validation failed: P(TP)=${(mcResult.probHitTP * 100).toFixed(1)}%`, input.agentOutputs);
         }
 
@@ -161,8 +161,8 @@ export class MasterOrchestrator {
           mtfAlignment: mtfScore
         });
 
-        if (distanceResult.distanceRatio > 1.5) {
-          logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.distanceRatio.toFixed(2)} > 1.5 (too far from winning patterns)`);
+        if (distanceResult.distanceRatio > 2.5) {
+          logger.info(`[Orchestrator] ${input.symbol}: Distance ratio ${distanceResult.distanceRatio.toFixed(2)} > 2.5 (too far from winning patterns)`);
           return this.getHoldDecision(input.currentPrice, `Setup differs from historical winners: ratio=${distanceResult.distanceRatio.toFixed(2)}`, input.agentOutputs);
         }
 
