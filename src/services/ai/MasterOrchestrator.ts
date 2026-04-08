@@ -3,8 +3,7 @@ import { config } from '../../config';
 import { ResearchOutput, TechnicalOutput, PredictorOutput, SignalDecision, AgentScores } from '../../types/signal';
 import { MarketRegime } from '../../types/market';
 import { DeepSeekClient } from './DeepSeekClient';
-import { isCryptoPair } from '../../config/pairs';
-import { CRYPTO_THRESHOLDS, ANTI_SCALPING } from '../../config/thresholds';
+import { ANTI_SCALPING } from '../../config/thresholds';
 // Phase 2 & 3: Quant Brain imports
 import { RegimeStrategyRouter } from './RegimeStrategyRouter';
 import { ConfidenceCalculator } from './ConfidenceCalculator';
@@ -49,12 +48,6 @@ interface OrchestratorInput {
 
 // Aggressive mode thresholds for paper trading
 const AGGRESSIVE_CONFIG = {
-  crypto: {
-    minRR: 1.3,           // Lower R:R for crypto (was 2.0)
-    minConfidence: 55,    // Lower confidence (was 70)
-    minChecks: 3,         // Fewer checks required (was 4)
-    allowCounterTrend: true
-  },
   forex: {
     minRR: 1.5,           // Slightly lower R:R for forex (was 2.0)
     minConfidence: 60,    // Slightly lower confidence
@@ -209,7 +202,6 @@ export class MasterOrchestrator {
   }
 
   private async orchestrateWithDeepSeek(input: OrchestratorInput, client: DeepSeekClient): Promise<SignalDecision> {
-    const isCrypto = isCryptoPair(input.symbol);
     const aggressiveMode = input.aggressiveMode ?? true; // Default to aggressive for paper trading
     
     // Check for EXPLOSIVE trend from predictor
@@ -241,11 +233,11 @@ export class MasterOrchestrator {
       logger.debug('DeepSeek V3.2-Speciale reasoning:', response.reasoningContent.slice(0, 500));
     }
 
-    return this.parseResponse(response.content, input.currentPrice, isCrypto, aggressiveMode, input.momentumBonus, explosiveBonus, input.atr, input.agentOutputs);
+    return this.parseResponse(response.content, input.currentPrice, aggressiveMode, input.momentumBonus, explosiveBonus, input.atr, input.agentOutputs);
   }
 
   private getSystemPrompt(assetType: string, aggressiveMode: boolean, isExplosiveTrend: boolean = false): string {
-    const aggressiveConfig = assetType === 'crypto' ? AGGRESSIVE_CONFIG.crypto : AGGRESSIVE_CONFIG.forex;
+    const aggressiveConfig = AGGRESSIVE_CONFIG.forex;
     
     let antiScalpingRule: string;
     let minRR: string;
@@ -257,9 +249,8 @@ export class MasterOrchestrator {
       antiScalpingRule = `${ANTI_SCALPING.stocks.minTp1Percent}% minimum move for stocks`;
       minRR = aggressiveMode ? '1:1.5' : '1:2';
     } else {
-      // CRYPTO - AGGRESSIVE MODE
-      antiScalpingRule = `${ANTI_SCALPING.crypto.minTp1Percent}% minimum move for crypto`;
-      minRR = aggressiveMode ? '1:1.3' : '1:1.5';
+      antiScalpingRule = `${ANTI_SCALPING.forex.minTp1Pips} pips minimum`;
+      minRR = aggressiveMode ? '1:1.5' : '1:2';
     }
 
     const modeLabel = aggressiveMode ? '🔥 AGGRESSIVE PAPER TRADING MODE' : 'STANDARD MODE';
@@ -305,7 +296,7 @@ Your job is to synthesize inputs from Research, Technical, and Prediction agents
 
 6. NEWS FILTER: ${aggressiveMode ? 'Reduce position during high-impact news, but can trade' : 'NO trading within 60 minutes of high-impact news'}
 
-7. SESSION FILTER: ${assetType === 'crypto' ? 'CRYPTO TRADES 24/7 - no session restrictions' : 'For EUR/GBP pairs, avoid Asian session'}
+7. SESSION FILTER: For EUR/GBP pairs, avoid Asian session
 
 ═══════════════════════════════════════════════════════════════
                          SL/TP PLACEMENT RULES (CRITICAL!)
@@ -494,8 +485,7 @@ Provide your trading decision as JSON.`;
 
   private parseResponse(
     content: string, 
-    currentPrice: number, 
-    isCrypto: boolean,
+    currentPrice: number,
     aggressiveMode: boolean,
     momentumBonus?: number,
     explosiveBonus: number = 0,
@@ -542,7 +532,7 @@ Provide your trading decision as JSON.`;
             logger.info(`[ORCHESTRATOR] Adjusted SL: ${oldSL} -> ${parsed.stop_loss} (enforced 1.5x ATR minimum)`);
             
             // Also adjust TP to maintain R:R ratio
-            const minRR = isCrypto ? 1.3 : 1.5;
+            const minRR = 1.5;
             const minTp1Distance = slDistance * minRR;
             const currentTp1Distance = Math.abs(parsed.take_profit_1 - parsed.entry_price);
             
@@ -565,8 +555,8 @@ Provide your trading decision as JSON.`;
           // Aggressive mode: 1.3 for crypto, 1.5 for forex
           const isExplosive = explosiveBonus > 0;
           const minRR = isExplosive 
-            ? (isCrypto ? 1.2 : 1.3) 
-            : (aggressiveMode ? (isCrypto ? 1.3 : 1.5) : 2.0);
+            ? 1.3 
+            : (aggressiveMode ? 1.5 : 2.0);
           
           if (tp1Distance < slDistance * minRR) {
             logger.warn(`R:R ratio ${(tp1Distance/slDistance).toFixed(2)}:1 below minimum ${minRR}:1`);
