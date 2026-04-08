@@ -105,21 +105,6 @@ export const ANTI_SCALPING = {
     minTp1Percent: 0.4,     // Aggressive for stocks
     minRiskReward: 1.5
   },
-  crypto: {
-    minTp1Percent: 1.0,     // AGGRESSIVE: 1% minimum for crypto (was 1.5%)
-    minRiskReward: 1.3,     // AGGRESSIVE: 1.3 R:R for more trades
-    maxLeverage: 20         // Conservative leverage for crypto
-  }
-};
-
-// Crypto-specific thresholds - AGGRESSIVE for paper trading
-export const CRYPTO_THRESHOLDS = {
-  minConfidence: 55,        // AGGRESSIVE: Lower threshold (was 65)
-  minVolatilityPercent: 0.15, // AGGRESSIVE: Lower min volatility (was 0.3)
-  maxVolatilityPercent: 15,  // AGGRESSIVE: Higher max volatility (was 10)
-  minVolumeMultiplier: 0.6,  // AGGRESSIVE: Lower volume requirement (was 0.8)
-  sessionBuffer: 0,          // No session buffer (24/7)
-  maxSpreadPercent: 0.5      // AGGRESSIVE: Higher spread tolerance (was 0.3)
 };
 
 // Major pairs list for spread classification
