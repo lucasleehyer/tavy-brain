@@ -1,5 +1,4 @@
 import { format, subDays, isWeekend, getDay, getHours } from 'date-fns';
-import { isCryptoPair } from '../config/pairs';
 
 /**
  * Check if forex market is open
@@ -29,31 +28,16 @@ export function isForexMarketOpen(): boolean {
 }
 
 /**
- * Check if crypto market is open (24/7)
- */
-export function isCryptoMarketOpen(): boolean {
-  return true; // Crypto trades 24/7
-}
-
-/**
  * Check if market is open for a given symbol
  */
-export function isMarketOpen(symbol: string): boolean {
-  if (isCryptoPair(symbol)) {
-    return isCryptoMarketOpen();
-  }
+export function isMarketOpen(_symbol?: string): boolean {
   return isForexMarketOpen();
 }
 
 /**
  * Get current trading session
  */
-export function getCurrentSession(symbol?: string): 'asian' | 'london' | 'newyork' | 'closed' | 'crypto_24h' {
-  // Crypto is always open
-  if (symbol && isCryptoPair(symbol)) {
-    return 'crypto_24h';
-  }
-
+export function getCurrentSession(_symbol?: string): 'asian' | 'london' | 'newyork' | 'closed' {
   if (!isForexMarketOpen()) {
     return 'closed';
   }
@@ -85,7 +69,6 @@ export function getCurrentSession(symbol?: string): 'asian' | 'london' | 'newyor
  */
 const MIN_SL_PIPS_FOREX = 15;      // Minimum 15 pips for forex
 const MIN_SL_PIPS_METALS = 50;    // Minimum 50 pips for gold/silver
-const MIN_SL_PERCENT_CRYPTO = 1.5; // Minimum 1.5% for crypto
 
 /**
  * Calculate lot size based on risk (forex/metals)
@@ -124,60 +107,6 @@ export function calculateLotSize(
   // Enforce min/max
   lotSize = Math.max(0.01, Math.min(lotSize, 10.0));
 
-  return lotSize;
-}
-
-/**
- * Calculate lot size for crypto CFDs (percentage-based)
- * Now with minimum SL enforcement to prevent oversized positions
- */
-export function calculateCryptoLotSize(
-  accountBalance: number,
-  riskPercent: number,
-  stopLossPercent: number,
-  entryPrice: number,
-  maxLeverage: number = 20
-): number {
-  // Enforce minimum SL percentage to prevent tiny SL / huge positions
-  const effectiveSlPercent = Math.max(stopLossPercent, MIN_SL_PERCENT_CRYPTO);
-  
-  if (stopLossPercent < MIN_SL_PERCENT_CRYPTO) {
-    console.warn(`[CRYPTO LOT SIZE] SL too tight: ${stopLossPercent}% < min ${MIN_SL_PERCENT_CRYPTO}%. Using ${effectiveSlPercent}%.`);
-  }
-  
-  // Risk amount in dollars
-  const riskAmount = accountBalance * (riskPercent / 100);
-  
-  // Position size based on stop loss percentage
-  // If SL is 2% away, and we want to risk $100, position = $100 / 0.02 = $5000
-  const positionValue = riskAmount / (effectiveSlPercent / 100);
-  
-  // Convert to lots (units of the crypto)
-  // For BTCUSD at $60000, $5000 position = 0.083 BTC
-  let lotSize = positionValue / entryPrice;
-  
-  // Apply leverage constraint
-  const maxPositionValue = accountBalance * maxLeverage;
-  if (positionValue > maxPositionValue) {
-    lotSize = maxPositionValue / entryPrice;
-    console.warn(`[CRYPTO LOT SIZE] Position exceeds max leverage. Capped to ${lotSize.toFixed(4)} lots.`);
-  }
-  
-  // Round to appropriate precision based on price
-  if (entryPrice > 10000) {
-    // BTC: round to 0.001
-    lotSize = Math.round(lotSize * 1000) / 1000;
-  } else if (entryPrice > 100) {
-    // ETH, SOL: round to 0.01
-    lotSize = Math.round(lotSize * 100) / 100;
-  } else {
-    // Smaller cryptos: round to 1
-    lotSize = Math.round(lotSize);
-  }
-  
-  // Enforce minimums
-  lotSize = Math.max(0.001, lotSize);
-  
   return lotSize;
 }
 
