@@ -1,6 +1,5 @@
 import { MetaApiManager } from '../services/websocket/MetaApiManager';
 import { PreFilter } from '../services/analysis/PreFilter';
-import { CryptoPreFilter } from '../services/analysis/CryptoPreFilter';
 import { RegimeDetector } from '../services/analysis/RegimeDetector';
 import { AICouncil } from '../services/ai/AICouncil';
 import { ExecutionRouter } from '../services/execution/ExecutionRouter';
@@ -14,9 +13,9 @@ import { AlertManager } from '../services/notifications/AlertManager';
 import { activityLogger } from '../services/database/ActivityLogger';
 import { logger } from '../utils/logger';
 import { Tick, Candle } from '../types/market';
-import { TradingThresholds, CRYPTO_THRESHOLDS } from '../config/thresholds';
+import { TradingThresholds } from '../config/thresholds';
 import { isMarketOpen, getCurrentSession } from '../utils/helpers';
-import { getAssetType, isCryptoPair } from '../config/pairs';
+import { getAssetType } from '../config/pairs';
 
 interface ProcessingState {
   lastProcessed: Map<string, number>;
@@ -37,7 +36,6 @@ interface MultiTimeframeCandles {
 export class SignalProcessor {
   private metaApi: MetaApiManager;
   private preFilter: PreFilter;
-  private cryptoPreFilter: CryptoPreFilter;
   private regimeDetector: RegimeDetector;
   private aiCouncil: AICouncil;
   private executionRouter: ExecutionRouter;
@@ -52,7 +50,6 @@ export class SignalProcessor {
   private isRunning: boolean = true;
 
   // Processing intervals by asset type
-  private readonly CRYPTO_PROCESS_INTERVAL = 300000;  // 5 minutes for crypto
   private readonly FOREX_PROCESS_INTERVAL = 900000;   // 15 minutes for forex
   private readonly STOCK_PROCESS_INTERVAL = 1800000;  // 30 minutes for stocks (API protection)
   private readonly INDEX_PROCESS_INTERVAL = 1200000;  // 20 minutes for indices
@@ -65,7 +62,7 @@ export class SignalProcessor {
       minAtrPips: settings.minAtrPips,
       momentumThresholdPips: settings.momentumThresholdPips
     });
-    this.cryptoPreFilter = new CryptoPreFilter();
+    
     this.regimeDetector = new RegimeDetector();
     this.aiCouncil = new AICouncil();
     this.signalRepo = new SignalRepository();
@@ -107,8 +104,7 @@ export class SignalProcessor {
     }
   }
 
-  private getProcessInterval(assetType: string, isCrypto: boolean): number {
-    if (isCrypto) return this.CRYPTO_PROCESS_INTERVAL;
+  private getProcessInterval(assetType: string): number {
     if (assetType === 'stock') return this.STOCK_PROCESS_INTERVAL;
     if (assetType === 'index') return this.INDEX_PROCESS_INTERVAL;
     return this.FOREX_PROCESS_INTERVAL; // Default for forex, commodities, etc.
@@ -117,11 +113,10 @@ export class SignalProcessor {
   async processTick(tick: Tick): Promise<void> {
     if (!this.isRunning) return;
 
-    const isCrypto = isCryptoPair(tick.symbol);
     const assetType = getAssetType(tick.symbol);
     
     // Get appropriate processing interval based on asset type
-    const processInterval = this.getProcessInterval(assetType, isCrypto);
+    const processInterval = this.getProcessInterval(assetType);
 
     // Check if market is open for this symbol (forex has schedule, crypto is 24/7)
     if (!isMarketOpen(tick.symbol)) {
@@ -181,7 +176,6 @@ export class SignalProcessor {
 
   private async analyzeSymbol(symbol: string, tick: Tick): Promise<void> {
     const assetType = getAssetType(symbol);
-    const isCrypto = isCryptoPair(symbol);
     
     try {
       // Log that we're analyzing
@@ -196,20 +190,8 @@ export class SignalProcessor {
         return; // Not enough data
       }
 
-      // Run appropriate pre-filter based on asset type
-      // Crypto uses CryptoPreFilter (no session restrictions - 24/7 trading)
-      // Forex/metals use PreFilter (session and weekend checks)
-      let preFilterResult;
-      if (isCrypto) {
-        const cryptoResult = this.cryptoPreFilter.analyze(symbol, candles15m);
-        preFilterResult = {
-          passed: cryptoResult.passed,
-          reason: cryptoResult.reason,
-          indicators: cryptoResult.indicators
-        };
-      } else {
-        preFilterResult = this.preFilter.analyze(symbol, candles15m);
-      }
+      // Run pre-filter (session and weekend checks)
+      const preFilterResult = this.preFilter.analyze(symbol, candles15m);
 
       if (!preFilterResult.passed) {
         await this.signalRepo.logDecision({
