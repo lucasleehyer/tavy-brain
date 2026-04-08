@@ -8,7 +8,7 @@ import { SettingsRepository } from './services/database/SettingsRepository';
 import { AlertManager } from './services/notifications/AlertManager';
 import { ThresholdOptimizer } from './services/ai/ThresholdOptimizer';
 import { logger } from './utils/logger';
-import { ALL_PAIRS, FOREX_PAIRS, CRYPTO_PAIRS } from './config/pairs';
+import { ALL_PAIRS, FOREX_PAIRS } from './config/pairs';
 
 // Track initialization state
 let initializationState = {
@@ -45,7 +45,8 @@ app.get('/status', (req, res) => {
     uptime: process.uptime(),
     uptimeFormatted: `${Math.floor(process.uptime() / 60)}m ${Math.floor(process.uptime() % 60)}s`,
     memory: process.memoryUsage(),
-    metaApiConnected: metaApiInstance?.isReady() || false
+    metaApiConnected: metaApiInstance?.isReady() || false,
+    reconnectInfo: reconnectState
   });
 });
 
@@ -59,6 +60,15 @@ app.get('/', (req, res) => {
 
 // Store metaApi reference for /symbols endpoint
 let metaApiInstance: MetaApiManager | null = null;
+
+// Track reconnection state for /status endpoint
+let reconnectState = {
+  lastDisconnectedAt: null as string | null,
+  lastReconnectAttempt: null as string | null,
+  reconnectAttempts: 0,
+  mode: 'normal' as 'normal' | 'periodic',
+  nextRetryMs: 0
+};
 
 // Debug endpoint to see all available symbols from broker
 app.get('/symbols', (req, res) => {
@@ -221,7 +231,7 @@ async function initialize() {
       // DEFAULT: Use curated pairs from pairs.ts (RECOMMENDED)
       // Only subscribe to symbols we actually trade - not ALL broker symbols!
       pairs = ALL_PAIRS;
-      logger.info(`Using curated pairs list: ${FOREX_PAIRS.length} forex + ${CRYPTO_PAIRS.length} crypto = ${pairs.length} total`);
+      logger.info(`Using curated pairs list: ${FOREX_PAIRS.length} forex/metals pairs`);
       
       // Log what broker offers vs what we use (for debugging)
       logger.info(`📊 Broker offers ${availableSymbols.length} symbols, but TAVY only trades ${pairs.length}`);
@@ -262,6 +272,7 @@ async function initialize() {
       logger.warn('MetaAPI disconnected');
       initializationState.metaApi = false;
       initializationState.status = 'degraded';
+      reconnectState.lastDisconnectedAt = new Date().toISOString();
       await alertManager.alertDisconnection();
     });
 
@@ -269,9 +280,21 @@ async function initialize() {
     metaApi.on('connected', () => {
       logger.info('MetaAPI reconnected');
       initializationState.metaApi = true;
+      reconnectState.reconnectAttempts = 0;
+      reconnectState.mode = 'normal';
+      reconnectState.nextRetryMs = 0;
       if (initializationState.supabase) {
         initializationState.status = 'ready';
       }
+    });
+
+    // Handle reconnect failure info (from resilient reconnect loop)
+    metaApi.on('reconnectFailed', (info: { attempts: number; nextRetryMs: number; mode: string }) => {
+      logger.warn(`MetaAPI reconnect failed (attempt ${info.attempts}, mode: ${info.mode}, next retry: ${Math.round(info.nextRetryMs / 1000)}s)`);
+      reconnectState.lastReconnectAttempt = new Date().toISOString();
+      reconnectState.reconnectAttempts = info.attempts;
+      reconnectState.mode = info.mode as 'normal' | 'periodic';
+      reconnectState.nextRetryMs = info.nextRetryMs;
     });
 
     // Subscribe to real-time settings updates
