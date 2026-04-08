@@ -8,8 +8,8 @@ import { activityLogger } from '../database/ActivityLogger';
 import { logger } from '../../utils/logger';
 import { Signal } from '../../types/signal';
 import { ExecutionResult } from '../../types/trade';
-import { calculateLotSize, calculateCryptoLotSize } from '../../utils/helpers';
-import { pipsToPrice, getPipMultiplier, isCryptoPair } from '../../config/pairs';
+import { calculateLotSize } from '../../utils/helpers';
+import { pipsToPrice, getPipMultiplier } from '../../config/pairs';
 import { ANTI_SCALPING } from '../../config/thresholds';
 
 interface ExecutionConfig {
@@ -139,7 +139,7 @@ export class ExecutionRouter {
 
     // ========== KELLY CALCULATOR INTEGRATION ==========
     // Get Kelly-optimal risk first, then apply confidence tier adjustments
-    const assetType = isCryptoPair(signal.symbol) ? 'crypto' : 'forex';
+    const assetType = 'forex';
     let baseRiskPercent = this.config.defaultRiskPercent;
     
     try {
@@ -368,28 +368,14 @@ export class ExecutionRouter {
       // Calculate lot size based on asset type
       let lotSize: number;
       
-      if (isCryptoPair(signal.symbol)) {
-        // Crypto uses percentage-based position sizing
-        const stopLossPercent = Math.abs((signal.entryPrice - signal.stopLoss) / signal.entryPrice) * 100;
-        const maxLeverage = ANTI_SCALPING.crypto.maxLeverage || 20;
-        lotSize = calculateCryptoLotSize(
-          balance,
-          riskPercent,
-          stopLossPercent,
-          signal.entryPrice,
-          maxLeverage
-        );
-        logger.info(`${account.account_name} [CRYPTO]: Balance $${balance}, Risk ${riskPercent}%, SL ${stopLossPercent.toFixed(2)}%, Lot size: ${lotSize}`);
-      } else {
-        // Forex/metals uses pip-based position sizing
-        const stopLossPips = Math.abs(signal.entryPrice - signal.stopLoss) * getPipMultiplier(signal.symbol);
-        lotSize = calculateLotSize(
-          balance,
-          riskPercent,
-          stopLossPips
-        );
-        logger.info(`${account.account_name} [FOREX]: Balance $${balance}, Risk ${riskPercent}%, Lot size: ${lotSize}`);
-      }
+      // Forex/metals uses pip-based position sizing
+      const stopLossPips = Math.abs(signal.entryPrice - signal.stopLoss) * getPipMultiplier(signal.symbol);
+      lotSize = calculateLotSize(
+        balance,
+        riskPercent,
+        stopLossPips
+      );
+      logger.info(`${account.account_name} [FOREX]: Balance $${balance}, Risk ${riskPercent}%, Lot size: ${lotSize}`);
 
       // CRITICAL: Apply maximum lot size cap
       const isGold = signal.symbol.includes('XAU') || signal.symbol.includes('GOLD');
