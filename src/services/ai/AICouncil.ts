@@ -85,7 +85,12 @@ export class AICouncil {
 
       // ========== MTF FILTER MODE (database-controllable) ==========
       // 0 = disabled, 1 = relaxed (allow partial alignment), 2 = strict (block if not aligned)
-      const mtfFilterMode = this.settingsRepo.getSetting('mtf_filter_mode') ?? 2;
+      // Ensure settings are hydrated before reading
+      let mtfFilterMode = this.settingsRepo.getSetting('mtf_filter_mode');
+      if (mtfFilterMode === null) {
+        await this.settingsRepo.loadSettings();
+        mtfFilterMode = this.settingsRepo.getSetting('mtf_filter_mode') ?? 2;
+      }
       
       logger.info(`[Phase 1] MTF=${mtfTrend.allowedDirection}, Session=${session.canTrade ? 'OK' : session.reason}, Correlation=${correlation.canTrade ? 'OK' : correlation.reason}, MTF_MODE=${mtfFilterMode === 2 ? 'strict' : mtfFilterMode === 1 ? 'relaxed' : 'disabled'}`);
 
